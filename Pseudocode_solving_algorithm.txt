@@ -1,0 +1,34 @@
+function best_response_EPEC(players, theta_init, tol, max_iter):
+Nadir/Utopia
+    theta = theta_init                 # theta[i] = upper-level strategy vector of player i
+    iter = 0
+
+    while iter < max_iter:
+        theta_old = copy(theta)
+
+        for i in players:
+
+            # 1) Fixed other players' strategies as parameters to player i's problem
+            params_i = { theta[j] for all j ≠ i }
+
+            # 2) Build the bilevel model for player i, LLP determines flows x_i
+            bilevel_i = build_bilevel_model(player = i, params = params_i)
+
+            # 3) Reformulate lower-level LP → KKT system via PAO
+            single_level_i = PAO.reformulate(bilevel_i, method = "KKT")
+
+            # 4) Solve the resulting single-level MPEC/NLP
+            sol_i = solve(single_level_i)
+
+            # 5) Extract updated upper-level strategy theta_i
+            theta[i] = extract_theta(sol_i)
+
+            # (note: LLP flows x_i also come out of sol_i but are NOT stored globally)
+
+        # 6) Convergence check on upper-level strategies only
+        if norm(theta - theta_old) < tol:   #norm is euclidian or max_dist norm -> decide wich is best
+            break
+
+        iter = iter + 1
+
+    return theta      # equilibrium candidate for the strategic decisions
