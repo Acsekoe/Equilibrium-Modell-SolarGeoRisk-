@@ -1,102 +1,135 @@
 from pyomo.environ import (
     ConcreteModel, Set, Param, Var, NonNegativeReals,
-    Objective, Constraint, minimize
+    Objective, Constraint, minimize, Suffix, SolverFactory, value
 )
 
-model = ConcreteModel()
+# ---------------------------------------------------------------------
+# 1) Concrete data (toy assumptions)
+# ---------------------------------------------------------------------
 
-# ======================
+R_list  = ['A', 'B']                   # Regions
+RR_list = [('A', 'B'), ('B', 'A')]     # Directed arcs, no diagonal
+
+c_mod_man_data     = {'A': 10.0, 'B': 11.0}     # manufacturing cost
+c_mod_dom_use_data = {'A':  2.0, 'B':  2.5}     # domestic-use cost
+c_ship_data        = {('A','B'): 1.0, ('B','A'): 1.2}  # shipping cost
+c_pen_llp_data     = {'A': 1000.0, 'B': 1000.0}        # penalty on unmet demand
+
+# "Upper-level" strategic variables treated as Params here
+d_mod_data         = {'A': 50.0, 'B': 60.0}     # demand
+q_mod_man_data     = {'A': 80.0, 'B': 90.0}     # manufacturing capacity
+q_mod_dom_use_data = {'A': 70.0, 'B': 75.0}     # domestic-use capacity
+tau_mod_data       = {('A','B'): 0.3, ('B','A'): 0.4}  # tariffs
+
+# ---------------------------------------------------------------------
+# 2) Build the LLP model
+# ---------------------------------------------------------------------
+
+m = ConcreteModel()
+
 # Sets
-# ======================
-model.R = Set(doc="Regions")
+m.R  = Set(initialize=R_list)
+m.RR = Set(dimen=2, initialize=RR_list)
 
-def arcs_init(m):
-    return ((r1, r2) for r1 in m.R for r2 in m.R if r1 != r2)
-
-model.RR = Set(dimen=2, initialize=arcs_init, doc="Directed trade arcs (e -> r), excluding diagonal")
-
-# ======================
 # Parameters
-# ======================
+m.c_mod_man      = Param(m.R,  initialize=c_mod_man_data)
+m.c_mod_dom_use  = Param(m.R,  initialize=c_mod_dom_use_data)
+m.c_ship         = Param(m.RR, initialize=c_ship_data)
+m.tau_mod        = Param(m.RR, initialize=tau_mod_data)
+m.c_pen_llp      = Param(m.R,  initialize=c_pen_llp_data)
+m.d_mod          = Param(m.R,  initialize=d_mod_data)
+m.q_mod_man      = Param(m.R,  initialize=q_mod_man_data)
+m.q_mod_dom_use  = Param(m.R,  initialize=q_mod_dom_use_data)
 
-model.c_mod_man      = Param(model.R)     # c^{mod, man}_r
-model.c_mod_dom_use  = Param(model.R)     # c^{mod, dom.use}_r
-model.c_ship         = Param(model.RR)    # c^{ship}_{e,r}
-model.tau_mod        = Param(model.RR)    # τ^{mod}_{e->r}
-model.c_pen_llp      = Param(model.R)     # c^{pen, llp}_r
-
-model.d_mod          = Param(model.R)     # d^{mod}_r
-model.q_mod_man      = Param(model.R)     # q^{mod, man}_r
-model.q_mod_dom_use  = Param(model.R)     # q^{mod, dom.use}_r
-
-# ======================
 # Variables
-# ======================
+m.x_mod_man      = Var(m.R,  domain=NonNegativeReals)  # manufacturing
+m.x_dem_mod      = Var(m.R,  domain=NonNegativeReals)  # demand served
+m.x_mod_dom_use  = Var(m.R,  domain=NonNegativeReals)  # domestic use
+m.x_mod_flow     = Var(m.RR, domain=NonNegativeReals)  # flow e -> r
 
-model.x_mod_man      = Var(model.R, domain=NonNegativeReals)  # x^{mod, man}_r
-model.x_dem_mod      = Var(model.R, domain=NonNegativeReals)  # x^{dem, mod}_r
-model.x_mod_dom_use  = Var(model.R, domain=NonNegativeReals)  # x^{mod, dom.use}_r
-model.x_mod_imp      = Var(model.RR, domain=NonNegativeReals) # x^{mod, imp}_{e,r}
-model.x_mod_exp      = Var(model.RR, domain=NonNegativeReals) # x^{mod, exp}_{r,i}
-
-# ======================
-# Objective
-# ======================
-
+# Objective: cost only for region A
+# Objective: minimize total system cost (A + B)
 def llp_cost_rule(m):
     return sum(
-        m.c_mod_man[r] * m.x_mod_man[r]
-        + m.c_mod_dom_use[r] * m.x_mod_dom_use[r]
-        + sum(
-            (m.c_ship[e, r] + m.tau_mod[e, r]) * m.x_mod_imp[e, r]
+        m.c_mod_man[r]      * m.x_mod_man[r]
+      + m.c_mod_dom_use[r] * m.x_mod_dom_use[r]
+      + sum(
+            (m.c_ship[e, r] + m.tau_mod[e, r]) * m.x_mod_flow[e, r]
             for (e, rr) in m.RR if rr == r
         )
-        + m.c_pen_llp[r] * (m.d_mod[r] - m.x_dem_mod[r])
-        for r in m.R
+      + m.c_pen_llp[r]     * (m.d_mod[r] - m.x_dem_mod[r])
+      for r in m.R
     )
 
-model.LLP_obj = Objective(rule=llp_cost_rule, sense=minimize)
+m.LLP_obj = Objective(rule=llp_cost_rule, sense=minimize)
 
-# ======================
-# Constraints
-# ======================
 
-# (1) Module balance:
-# sum_{e != r} x^{imp}_{e,r} + x^{dom.use}_r = x^{dem,mod}_r
+m.LLP_obj = Objective(rule=llp_cost_rule, sense=minimize)
+
+# Module balance: imports + domestic use = demand served
 def module_balance_rule(m, r):
-    imports_to_r = sum(m.x_mod_imp[e, r] for (e, rr) in m.RR if rr == r)
+    imports_to_r = sum(m.x_mod_flow[e, r] for (e, rr) in m.RR if rr == r)
     return imports_to_r + m.x_mod_dom_use[r] == m.x_dem_mod[r]
 
-model.ModuleBalance = Constraint(model.R, rule=module_balance_rule)
+m.ModuleBalance = Constraint(m.R, rule=module_balance_rule)
 
-# (2) Production balance:
-# x^{man}_r = x^{dom.use}_r + sum_{i != r} x^{exp}_{r,i}
+# Production balance: manufacturing = domestic use + exports
 def production_balance_rule(m, r):
-    exports_from_r = sum(m.x_mod_exp[r, i] for (rr, i) in m.RR if rr == r)
+    exports_from_r = sum(m.x_mod_flow[r, i] for (rr, i) in m.RR if rr == r)
     return m.x_mod_man[r] == m.x_mod_dom_use[r] + exports_from_r
 
-model.ProductionBalance = Constraint(model.R, rule=production_balance_rule)
+m.ProductionBalance = Constraint(m.R, rule=production_balance_rule)
 
-# (3) Trade balance:
-# x^{imp}_{e,r} = x^{exp}_{r,i}
-def trade_balance_rule(m, e, r):
-    return m.x_mod_exp[e, r] == m.x_mod_imp[e, r]
-
-model.TradeBalance = Constraint(model.RR, rule=trade_balance_rule)
-
-
-# (4) Capacity bound on manufacturing:
+# Bounds
 def man_capacity_rule(m, r):
     return m.x_mod_man[r] <= m.q_mod_man[r]
-model.ManufacturingCapacity = Constraint(model.R, rule=man_capacity_rule)
 
-# (5) Demand coverage bounds:
+m.ManCap = Constraint(m.R, rule=man_capacity_rule)
+
 def demand_bound_rule(m, r):
     return m.x_dem_mod[r] <= m.d_mod[r]
-model.DemandBound = Constraint(model.R, rule=demand_bound_rule)
 
-# (6) Domestic use capacity:
+m.DemBound = Constraint(m.R, rule=demand_bound_rule)
+
 def domuse_capacity_rule(m, r):
     return m.x_mod_dom_use[r] <= m.q_mod_dom_use[r]
-model.DomesticUseCapacity = Constraint(model.R, rule=domuse_capacity_rule)
 
+m.DomCap = Constraint(m.R, rule=domuse_capacity_rule)
+
+# ---------------------------------------------------------------------
+# 3) Attach dual suffix and solve LLP
+# ---------------------------------------------------------------------
+
+m.dual = Suffix(direction=Suffix.IMPORT)
+
+if __name__ == "__main__":
+    solver = SolverFactory("gurobi")  # or "glpk", "cbc", etc.
+    results = solver.solve(m, tee=True)
+
+    print("\n=== OBJECTIVE VALUE (A's LLP) ===")
+    print("LLP_obj =", value(m.LLP_obj))
+
+    print("\n=== PRIMAL VARIABLES ===")
+    for r in m.R:
+        print(f"\nRegion {r}:")
+        print(f"  x_mod_man[{r}]     = {value(m.x_mod_man[r]):.4f}")
+        print(f"  x_dem_mod[{r}]     = {value(m.x_dem_mod[r]):.4f}")
+        print(f"  x_mod_dom_use[{r}] = {value(m.x_mod_dom_use[r]):.4f}")
+
+    print("\n=== ARC FLOWS (x_mod_flow[e,r]) ===")
+    for (e, r) in m.RR:
+        print(f"  flow {e} -> {r}: x_mod_flow[{e},{r}] = {value(m.x_mod_flow[e, r]):.4f}")
+
+    # Per-region imports and exports derived from x_mod_flow
+    print("\n=== IMPORTS / EXPORTS PER REGION ===")
+    for r in m.R:
+        imports_r = sum(value(m.x_mod_flow[e, r]) for (e, rr) in m.RR if rr == r)
+        exports_r = sum(value(m.x_mod_flow[r, i]) for (rr, i) in m.RR if rr == r)
+        print(f"Region {r}:")
+        print(f"  total imports into {r} = {imports_r:.4f}")
+        print(f"  total exports from {r} = {exports_r:.4f}")
+
+    print("\n=== DUALS OF MODULE BALANCE (λ_MB) ===")
+    for r in m.R:
+        lam = m.dual[m.ModuleBalance[r]]
+        print(f"  lambda_MB[{r}] = {lam:.4f}")
