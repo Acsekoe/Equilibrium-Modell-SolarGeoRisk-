@@ -1,1 +1,4 @@
 pyomo
+sphinx
+myst-parser
+sphinx-autodoc-typehints
