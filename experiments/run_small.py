@@ -16,10 +16,10 @@ if __name__ == "__main__":
         params=params,
         theta0=theta0,
         max_iter=20,
-        tol=1e-4,
+        tol=1e-12,
         eps=1e-4,
-        damping=0.7,
-        price_sign=1.0,   # if prices come out negative, switch to -1.0
+        damping=1.0,
+        price_sign=-1.0,   # if prices come out negative, switch to -1.0
         ipopt_options=ipopt_opts,
     )
 
@@ -28,4 +28,14 @@ if __name__ == "__main__":
     print("q_dom:", theta_star.q_dom)
     print("d_offer:", theta_star.d_offer)
     print("tau sample:", dict(list(theta_star.tau.items())[:5]))
-    print("\nLast 10 log entries:", hist[-10:])
+    print("\nLast log entry:", hist[-1:])
+
+
+
+
+#to run EPEC new Terminal in project root and run:
+'''
+$env:PYTHONPATH = "$(pwd)\src"
+python experiments\run_small.py
+
+'''

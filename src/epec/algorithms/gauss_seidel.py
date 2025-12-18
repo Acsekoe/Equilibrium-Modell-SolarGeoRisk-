@@ -7,16 +7,18 @@ from epec.core.params import Params
 from epec.core.theta import Theta
 from epec.ulp.player_mpec import build_player_mpec
 
-def solve_gauss_seidel(sets: Sets,
-                       params: Params,
-                       theta0: Theta,
-                       max_iter: int = 30,
-                       tol: float = 1e-4,
-                       eps: float = 1e-4,
-                       damping: float = 0.7,
-                       price_sign: float = 1.0,
-                       ipopt_options: Dict[str, float] | None = None
-                       ) -> Tuple[Theta, List[dict]]:
+def solve_gauss_seidel(
+    sets: Sets,
+    params: Params,
+    theta0: Theta,
+    max_iter: int = 30,
+    tol: float = 1e-4,
+    eps: float = 1e-4,
+    damping: float = 0.7,
+    price_sign: float = -1.0,
+    ipopt_options: Dict[str, float] | None = None
+) -> Tuple[Theta, List[dict]]:
+
     theta = theta0
     solver = pyo.SolverFactory("ipopt")
     if ipopt_options:
@@ -24,6 +26,7 @@ def solve_gauss_seidel(sets: Sets,
             solver.options[k] = v
 
     hist: List[dict] = []
+    iters_done = 0  # how many outer GS iterations we actually executed
 
     for it in range(max_iter):
         max_change = 0.0
@@ -42,11 +45,33 @@ def solve_gauss_seidel(sets: Sets,
                 hist.append({"iter": it, "region": r, "accepted": False, "status": str(tc)})
                 continue
 
+            # ---- lambda + objective prints (after successful solve) ----
+            lam_vals = {rr: float(pyo.value(m.lam[rr])) for rr in sets.R}
+            ulp_val = float(pyo.value(m.ULP_OBJ))
+            print(
+                f"[iter {it:>2}] player={r:<2}  "
+                f"ULP_OBJ={ulp_val:>14,.6f}  "
+                f"lambda[ch]={lam_vals['ch']:>12.6f}  "
+                f"lambda[eu]={lam_vals['eu']:>12.6f}  "
+                f"lambda[us]={lam_vals['us']:>12.6f}"
+                )
+
+            # LLP flows and usage (inspection)
+            exp_flows = {i: float(pyo.value(m.x_flow[r, i])) for i in sets.R if i != r}
+            imp_flows = {e: float(pyo.value(m.x_flow[e, r])) for e in sets.R if e != r}
+            dom_use = float(pyo.value(m.q_dom[r]))
+            used_cap = float(pyo.value(m.x_man[r]))
+            covered_dem = float(pyo.value(m.x_dem[r]))
+            print(f"         exports {r}->*: {exp_flows}")
+            print(f"         imports *->{r}: {imp_flows}")
+            print(f"         domestic_use {r}: {dom_use} | used_capacity {used_cap} | covered_demand {covered_dem}")
+
+
             # BR values
             br_qman = pyo.value(m.q_man_var)
             br_qdom = pyo.value(m.q_dom_var)
             br_d    = pyo.value(m.d_offer_var)
-            br_tau  = { (e, r): pyo.value(m.tau_var[e]) for e in sets.R if e != r }
+            br_tau  = {(e, r): pyo.value(m.tau_var[e]) for e in sets.R if e != r}
 
             # damped update
             def upd(old, new):
@@ -57,19 +82,35 @@ def solve_gauss_seidel(sets: Sets,
             theta.q_dom[r]   = upd(theta.q_dom[r], br_qdom)
             theta.d_offer[r] = upd(theta.d_offer[r], br_d)
 
-            max_change = max(max_change,
-                             abs(theta.q_man[r] - old[0]),
-                             abs(theta.q_dom[r] - old[1]),
-                             abs(theta.d_offer[r] - old[2]))
+            max_change = max(
+                max_change,
+                abs(theta.q_man[r] - old[0]),
+                abs(theta.q_dom[r] - old[1]),
+                abs(theta.d_offer[r] - old[2]),
+            )
 
             for (e, rr) in br_tau:
                 old_t = theta.tau[(e, rr)]
                 theta.tau[(e, rr)] = upd(old_t, br_tau[(e, rr)])
                 max_change = max(max_change, abs(theta.tau[(e, rr)] - old_t))
 
-            hist.append({"iter": it, "region": r, "accepted": True, "status": str(tc)})
+            hist.append({
+                "iter": it,
+                "region": r,
+                "accepted": True,
+                "status": str(tc),
+                "lambda": lam_vals,
+                "ulp_obj": ulp_val,
+            })
+
+        # end of one full GS sweep
+        iters_done = it + 1
+        print(f"\n=== end GS iter {it}: max_change={max_change} (tol={tol}) ===")
 
         if max_change < tol:
             break
 
+    print(f"\n=== Gauss–Seidel finished: {iters_done} iteration(s) executed ===")
     return theta, hist
+
+

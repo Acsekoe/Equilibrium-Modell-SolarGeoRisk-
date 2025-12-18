@@ -12,7 +12,7 @@ def build_player_mpec(region: str,
                       params: Params,
                       theta_fixed: Theta,
                       eps: float = 1e-4,
-                      price_sign: float = 1.0) -> pyo.ConcreteModel:
+                      price_sign: float = -1.0) -> pyo.ConcreteModel:
     """
     One region r solves: max Pi_r subject to LLP-KKT, with other regions' theta fixed.
     price_sign: set to -1.0 if your lam comes out negative due to sign convention.

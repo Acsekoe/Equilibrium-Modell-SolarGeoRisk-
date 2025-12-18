@@ -29,3 +29,12 @@ if __name__ == "__main__":
     print("\ncheck module-balance residuals:")
     for r in sets.R:
         print(r, pyo.value(m.mod_balance[r].body))
+
+
+
+#to run C new Terminal in project root and run:
+'''
+$env:PYTHONPATH = "$(pwd)\src"
+python experiments\run_llp_kkt.py
+
+'''
