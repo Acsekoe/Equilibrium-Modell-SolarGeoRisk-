@@ -7,6 +7,7 @@ from epec.core.theta import Theta
 from epec.llp.primal import build_llp_primal
 from epec.llp.kkt import add_llp_kkt
 
+
 def build_player_mpec(region: str,
                       sets: Sets,
                       params: Params,
@@ -17,34 +18,31 @@ def build_player_mpec(region: str,
     One region r solves: max Pi_r subject to LLP-KKT, with other regions' theta fixed.
     price_sign: set to -1.0 if your lam comes out negative due to sign convention.
     """
-    R = sets.R
+    R, RR = sets.R, sets.RR
     r = region
 
+    # LLP core with "strategic" quantities as Vars (q_man/d_offer/tau)
     m = build_llp_primal(sets, params, theta_fixed)
 
-    # Strategic vars for THIS player
-    m.q_man_var   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0.0, params.Q_man_hat[r]))
-    m.q_dom_var   = pyo.Var(within=pyo.NonNegativeReals, bounds=(0.0, params.Q_dom_hat[r]))
-    m.d_offer_var = pyo.Var(within=pyo.NonNegativeReals, bounds=(0.0, params.D_hat[r]))
-
-    m.link_qman = pyo.Constraint(expr=m.q_man[r]   == m.q_man_var)
-    m.link_qdom = pyo.Constraint(expr=m.q_dom[r]   == m.q_dom_var)
-    m.link_d    = pyo.Constraint(expr=m.d_offer[r] == m.d_offer_var)
-
-    # Tariffs into r: tau[e->r] for e != r
-    m.tau_var = pyo.Var(m.R, within=pyo.NonNegativeReals)
-    for e in R:
-        if e == r:
-            m.tau_var[e].fix(0.0)
+    # --- Fix OTHER players' strategic vars; FREE this player's with hat-bounds ---
+    for s in R:
+        if s != r:
+            m.q_man[s].fix(theta_fixed.q_man[s])
+            m.d_offer[s].fix(theta_fixed.d_offer[s])
         else:
-            m.tau_var[e].setlb(0.0)
-            m.tau_var[e].setub(params.tau_ub[(e, r)])
+            # hats live here (ULP)
+            m.q_man[s].setub(params.Q_man_hat[s])
+            m.d_offer[s].setub(params.D_hat[s])
 
-    m.link_tau = pyo.Constraint(m.R, rule=lambda mm, e:
-        pyo.Constraint.Skip if e == r else mm.tau[e, r] == mm.tau_var[e]
-    )
+    # --- Tariffs: player r controls tau[e->r] only; all other taus fixed ---
+    for (e, rr) in RR:
+        if rr == r:
+            # decision of player r (imports into r)
+            m.tau[e, rr].setub(params.tau_ub[(e, rr)])
+        else:
+            m.tau[e, rr].fix(theta_fixed.tau[(e, rr)])
 
-    # Add KKT of LLP (introduces lam[r])
+    # Add KKT of LLP (introduces lam, pi, mu, nu, etc.)
     add_llp_kkt(m, sets, eps=eps)
 
     # Deactivate LLP objective: we solve ULP objective with KKT constraints
@@ -52,17 +50,19 @@ def build_player_mpec(region: str,
 
     # Regional LLP cost component C_r^{LLP}(x,tau)
     def C_llp_r(mm):
-        man = params.c_mod_man[r] * mm.x_man[r]
-        ship = sum(params.c_ship[e, r] * mm.x_flow[e, r] * mm.tau[e, r] for e in R if e != r)
-        pen = params.c_pen_llp[r] * (mm.d_offer[r] - mm.x_dem[r])
-        return man + ship + pen
+        man  = params.c_mod_man[r] * mm.x_man[r]
+        dom  = params.c_mod_dom_use[r] * mm.x_dom[r]
+        ship = sum(params.c_ship[e, r] * (1 + mm.tau[e, r]) * mm.x_flow[e, r]
+                for e in R if e != r)
+        pen  = params.c_pen_llp[r] * (mm.d_offer[r] - mm.x_dem[r])
+        return man + dom + ship + pen
 
-    # ULP profit using λ = dual of module balance
+
+    # ULP profit using IZ = dual of module balance
     def ulp_obj(mm):
         export_rev = sum(price_sign * mm.lam[i] * mm.x_flow[r, i] for i in R if i != r)
-        dom_cost = params.c_mod_dom_use[r] * mm.q_dom[r]
-        unmet_pen = params.c_pen_ulp[r] * (params.D_hat[r] - mm.x_dem[r])
-        return export_rev - dom_cost - (C_llp_r(mm) + unmet_pen)
+        unmet_pen  = params.c_pen_ulp[r] * (params.D_hat[r] - mm.x_dem[r])
+        return export_rev - (C_llp_r(mm) + unmet_pen)
 
     m.ULP_OBJ = pyo.Objective(rule=ulp_obj, sense=pyo.maximize)
     return m

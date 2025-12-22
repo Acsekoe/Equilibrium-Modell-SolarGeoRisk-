@@ -59,7 +59,7 @@ def solve_gauss_seidel(
             # LLP flows and usage (inspection)
             exp_flows = {i: float(pyo.value(m.x_flow[r, i])) for i in sets.R if i != r}
             imp_flows = {e: float(pyo.value(m.x_flow[e, r])) for e in sets.R if e != r}
-            dom_use = float(pyo.value(m.q_dom[r]))
+            dom_use = float(pyo.value(m.x_dom[r]))
             used_cap = float(pyo.value(m.x_man[r]))
             covered_dem = float(pyo.value(m.x_dem[r]))
             print(f"         exports {r}->*: {exp_flows}")
@@ -67,31 +67,31 @@ def solve_gauss_seidel(
             print(f"         domestic_use {r}: {dom_use} | used_capacity {used_cap} | covered_demand {covered_dem}")
 
 
-            # BR values
-            br_qman = pyo.value(m.q_man_var)
-            br_qdom = pyo.value(m.q_dom_var)
-            br_d    = pyo.value(m.d_offer_var)
-            br_tau  = {(e, r): pyo.value(m.tau_var[e]) for e in sets.R if e != r}
+            # BR values (strategic vars are the shared vars in the model now)
+            br_qman = pyo.value(m.q_man[r])
+            br_d    = pyo.value(m.d_offer[r])
+            br_tau  = {(e, r): pyo.value(m.tau[e, r]) for e in sets.R if e != r}
+
 
             # damped update
             def upd(old, new):
                 return old + damping * (new - old)
 
-            old = (theta.q_man[r], theta.q_dom[r], theta.d_offer[r])
+            old = (theta.q_man[r], theta.d_offer[r])
             theta.q_man[r]   = upd(theta.q_man[r], br_qman)
-            theta.q_dom[r]   = upd(theta.q_dom[r], br_qdom)
             theta.d_offer[r] = upd(theta.d_offer[r], br_d)
 
             max_change = max(
                 max_change,
                 abs(theta.q_man[r] - old[0]),
-                abs(theta.q_dom[r] - old[1]),
-                abs(theta.d_offer[r] - old[2]),
+                abs(theta.d_offer[r] - old[1]),
             )
 
             for (e, rr) in br_tau:
                 old_t = theta.tau[(e, rr)]
-                theta.tau[(e, rr)] = upd(old_t, br_tau[(e, rr)])
+                # guard against numerical negatives / overshoots when fixing taus
+                projected_tau = max(0.0, min(params.tau_ub[(e, rr)], br_tau[(e, rr)]))
+                theta.tau[(e, rr)] = upd(old_t, projected_tau)
                 max_change = max(max_change, abs(theta.tau[(e, rr)] - old_t))
 
             hist.append({
@@ -110,7 +110,6 @@ def solve_gauss_seidel(
         if max_change < tol:
             break
 
-    print(f"\n=== Gauss–Seidel finished: {iters_done} iteration(s) executed ===")
+    print(f"\n=== Gauss-Seidel finished: {iters_done} iteration(s) executed ===")
     return theta, hist
-
 

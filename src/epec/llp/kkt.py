@@ -23,6 +23,7 @@ def add_llp_kkt(m: pyo.ConcreteModel, sets: Sets, eps: float = 1e-4) -> None:
 
     # Duals for nonnegativity: nu >= 0
     m.nu_xman  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # x_man >= 0
+    m.nu_xdom  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # x_dom >= 0
     m.nu_xdem  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # x_dem >= 0
     m.nu_xflow = pyo.Var(m.RR, within=pyo.NonNegativeReals)  # x_flow >= 0
 
@@ -32,6 +33,11 @@ def add_llp_kkt(m: pyo.ConcreteModel, sets: Sets, eps: float = 1e-4) -> None:
         mm.c_mod_man[r] + mm.pi[r] + mm.mu_man[r] - mm.nu_xman[r] == 0
     )
 
+    # d/dx_dom[r]: c_mod_dom_use[r] + lam[r] - pi[r] - nu_xdom[r] = 0
+    m.stat_xdom = pyo.Constraint(m.R, rule=lambda mm, r:
+        mm.c_mod_dom_use[r] + mm.lam[r] - mm.pi[r] - mm.nu_xdom[r] == 0
+    )
+
     # d/dx_dem[r]: -c_pen_llp[r] - lam[r] + mu_dem[r] - nu_xdem[r] = 0
     m.stat_xdem = pyo.Constraint(m.R, rule=lambda mm, r:
         -mm.c_pen_llp[r] - mm.lam[r] + mm.mu_dem[r] - mm.nu_xdem[r] == 0
@@ -39,7 +45,7 @@ def add_llp_kkt(m: pyo.ConcreteModel, sets: Sets, eps: float = 1e-4) -> None:
 
     # d/dx_flow[e,r]: c_ship[e,r]*tau[e,r] + lam[r] - pi[e] - nu_xflow[e,r] = 0
     m.stat_xflow = pyo.Constraint(m.RR, rule=lambda mm, e, r:
-        mm.c_ship[e, r] * mm.tau[e, r] + mm.lam[r] - mm.pi[e] - mm.nu_xflow[e, r] == 0
+        mm.c_ship[e, r] * (1 + mm.tau[e, r]) + mm.lam[r] - mm.pi[e] - mm.nu_xflow[e, r] == 0
     )
 
     # Complementarity (smoothed FB)
@@ -47,6 +53,7 @@ def add_llp_kkt(m: pyo.ConcreteModel, sets: Sets, eps: float = 1e-4) -> None:
         add_fb_comp(m, m.mu_man[r], (m.q_man[r] - m.x_man[r]), eps, f"comp_man_cap_{r}")
         add_fb_comp(m, m.mu_dem[r], (m.d_offer[r] - m.x_dem[r]), eps, f"comp_dem_ub_{r}")
         add_fb_comp(m, m.nu_xman[r], m.x_man[r], eps, f"comp_xman_{r}")
+        add_fb_comp(m, m.nu_xdom[r], m.x_dom[r], eps, f"comp_xdom_{r}")
         add_fb_comp(m, m.nu_xdem[r], m.x_dem[r], eps, f"comp_xdem_{r}")
 
     for (e, r) in RR:
