@@ -62,7 +62,11 @@ def build_player_mpec(region: str,
     def ulp_obj(mm):
         export_rev = sum(price_sign * mm.lam[i] * mm.x_flow[r, i] for i in R if i != r)
         unmet_pen  = params.c_pen_ulp[r] * (params.D_hat[r] - mm.x_dem[r])
-        return export_rev - (C_llp_r(mm) + unmet_pen)
+
+        cap_cost = 1e-3 * mm.q_man[r]   # <-- add this (tune 1e-4 … 1e-2)
+
+        return export_rev - (C_llp_r(mm) + unmet_pen + cap_cost)
+
 
     m.ULP_OBJ = pyo.Objective(rule=ulp_obj, sense=pyo.maximize)
     return m

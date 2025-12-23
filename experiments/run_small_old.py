@@ -1,15 +1,6 @@
 from __future__ import annotations
-
 from epec.data.example_case import make_example
 from epec.algorithms.gauss_seidel import solve_gauss_seidel
-
-
-def _fmt_arcs(d):
-    lines = []
-    for (e, r), v in sorted(d.items()):
-        lines.append(f"  {e}->{r}: {v:,.6f}")
-    return "\n".join(lines)
-
 
 if __name__ == "__main__":
     sets, params, theta0 = make_example()
@@ -28,24 +19,22 @@ if __name__ == "__main__":
         tol=1e-4,
         eps=1e-4,
         damping=0.8,
-        price_sign=-1.0,  # if prices come out negative due to sign convention, keep -1.0
+        price_sign=-1.0,   # if prices come out negative, switch to -1.0
         ipopt_options=ipopt_opts,
-        verbose=True,
     )
 
-    print("\n=== Final theta ===")
+    print("\nFinal theta:")
     print("q_man:", theta_star.q_man)
     print("d_offer:", theta_star.d_offer)
-    print("tau (all arcs):\n" + _fmt_arcs(theta_star.tau))
-
-    print("\n=== Last 3 log entries ===")
-    for row in hist[-3:]:
-        print(row)
+    print("tau sample:", dict(list(theta_star.tau.items())[:5]))
+    print("\nLast log entry:", hist[-1:])
 
 
 
-# to run (PowerShell) in project root:
+
+#to run EPEC new Terminal in project root and run:
 '''
-   $env:PYTHONPATH = "$(pwd)\src"
-   python experiments\run_small.py
+$env:PYTHONPATH = "$(pwd)\src"
+python experiments\run_small.py
+
 '''
