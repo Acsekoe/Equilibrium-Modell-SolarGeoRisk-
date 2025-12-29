@@ -26,7 +26,7 @@ def make_example():
 
         # penalties large so demand is served whenever feasible
         c_pen_llp={"ch": 1000.0, "eu": 1000.0, "us": 1000.0},
-        c_pen_ulp={"ch": 2000.0, "eu": 2000.0, "us": 2000.0},
+        c_pen_ulp={"ch": 500.0, "eu": 500.0, "us": 500.0},
 
         # demands
         D_hat={"ch": 20.0, "eu": 40.0, "us": 30.0},

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 import pyomo.environ as pyo
+from pyomo.opt import SolverStatus, TerminationCondition
 
 from epec.core.sets import Sets
 from epec.core.params import Params
@@ -9,9 +10,9 @@ from epec.core.theta import Theta
 from epec.ulp.player_mpec import build_player_mpec
 
 
-def _val(x) -> float:
-    """Safe float(value(.)) for Pyomo components."""
-    return float(pyo.value(x))
+def _val(x, default: float = float("nan")) -> float:
+    v = pyo.value(x, exception=False)
+    return default if v is None else float(v)
 
 
 def _fmt_map(d: Dict, key_order=None, width: int = 12, prec: int = 6) -> str:
@@ -28,8 +29,12 @@ def _fmt_map(d: Dict, key_order=None, width: int = 12, prec: int = 6) -> str:
     return "{ " + ", ".join(parts) + " }"
 
 
-def _fmt_arcs(d: Dict[Tuple[str, str], float], arc_order: List[Tuple[str, str]] | None = None,
-              width: int = 12, prec: int = 6) -> str:
+def _fmt_arcs(
+    d: Dict[Tuple[str, str], float],
+    arc_order: List[Tuple[str, str]] | None = None,
+    width: int = 12,
+    prec: int = 6,
+) -> str:
     if arc_order is None:
         arc_order = list(d.keys())
     lines = []
@@ -43,35 +48,36 @@ def _print_player_block(it: int, player: str, m: pyo.ConcreteModel, sets: Sets) 
     R = list(sets.R)
     RR = list(sets.RR)
 
-    # Objectives
     ulp_obj = _val(m.ULP_OBJ)
     llp_obj = _val(m.LLP_OBJ.expr) if hasattr(m, "LLP_OBJ") else float("nan")
 
-    # Upper-level decisions (as vars inside the MPEC model)
     q_man = {r: _val(m.q_man[r]) for r in R}
     d_offer = {r: _val(m.d_offer[r]) for r in R}
     tau = {(e, r): _val(m.tau[e, r]) for (e, r) in RR}
 
-    # Lower-level flows
     x_man = {r: _val(m.x_man[r]) for r in R}
     x_dom = {r: _val(m.x_dom[r]) for r in R}
     x_dem = {r: _val(m.x_dem[r]) for r in R}
+    u_dem = {r: _val(m.u_dem[r]) for r in R} if hasattr(m, "u_dem") else {}
+    dem_gap = {r: _val(m.d_offer[r] - m.x_dem[r]) for r in R} if hasattr(m, "d_offer") else {}
     x_flow = {(e, r): _val(m.x_flow[e, r]) for (e, r) in RR}
 
-    # Equality-dual variables from the LLP KKT
     lam = {r: _val(m.lam[r]) for r in R} if hasattr(m, "lam") else {}
     pi = {r: _val(m.pi[r]) for r in R} if hasattr(m, "pi") else {}
+    nu_udem = {r: _val(m.nu_udem[r]) for r in R} if hasattr(m, "nu_udem") else {}
 
-    # Residual checks for LLP equalities
     mod_res = {}
     prod_res = {}
+    dem_link_res = {}
     if hasattr(m, "mod_balance"):
         for r in R:
-            # equality: body == lower == upper
             mod_res[r] = _val(m.mod_balance[r].body - m.mod_balance[r].lower)
     if hasattr(m, "prod_balance"):
         for r in R:
             prod_res[r] = _val(m.prod_balance[r].body - m.prod_balance[r].lower)
+    if hasattr(m, "dem_link"):
+        for r in R:
+            dem_link_res[r] = _val(m.dem_link[r].body - m.dem_link[r].lower)
 
     sep = "-" * 78
     print(sep)
@@ -88,6 +94,11 @@ def _print_player_block(it: int, player: str, m: pyo.ConcreteModel, sets: Sets) 
     print("  x_man:", _fmt_map(x_man, key_order=R))
     print("  x_dom:", _fmt_map(x_dom, key_order=R))
     print("  x_dem:", _fmt_map(x_dem, key_order=R))
+    if u_dem:
+        print("  u_dem:", _fmt_map(u_dem, key_order=R))
+        print(f"  max_u_dem: {max(u_dem.values()):.6g}")
+    if dem_gap:
+        print("  d_offer - x_dem:", _fmt_map(dem_gap, key_order=R, width=12, prec=6))
     print("  x_flow (arcs):")
     print(_fmt_arcs(x_flow, arc_order=RR))
 
@@ -96,12 +107,16 @@ def _print_player_block(it: int, player: str, m: pyo.ConcreteModel, sets: Sets) 
         print("  lam (module balance):", _fmt_map(lam, key_order=R))
     if pi:
         print("  pi  (production balance):", _fmt_map(pi, key_order=R))
+    if nu_udem:
+        print("  nu_udem (u_dem >= 0):", _fmt_map(nu_udem, key_order=R))
 
     print("\nResiduals (should be ~0):")
     if mod_res:
         print("  mod_balance:", _fmt_map(mod_res, key_order=R, width=12, prec=3))
     if prod_res:
         print("  prod_balance:", _fmt_map(prod_res, key_order=R, width=12, prec=3))
+    if dem_link_res:
+        print("  dem_link (x_dem+u_dem=d_offer):", _fmt_map(dem_link_res, key_order=R, width=12, prec=3))
     print(sep)
 
 
@@ -112,6 +127,7 @@ def solve_gauss_seidel(
     max_iter: int = 30,
     tol: float = 1e-4,
     eps: float = 1e-4,
+    eps_u: float = 1e-12,
     damping: float = 0.7,
     price_sign: float = -1.0,
     ipopt_options: Dict[str, float] | None = None,
@@ -125,28 +141,40 @@ def solve_gauss_seidel(
             solver.options[k] = v
 
     hist: List[dict] = []
-    iters_done = 0  # how many outer GS iterations we actually executed
+    iters_done = 0
 
     for it in range(max_iter):
         max_change = 0.0
 
         for r in sets.R:
-            m = build_player_mpec(r, sets, params, theta, eps=eps, price_sign=price_sign)
-            res = solver.solve(m, tee=False)
-
-            tc = res.solver.termination_condition
-            ok = tc in (
-                pyo.TerminationCondition.optimal,
-                pyo.TerminationCondition.locallyOptimal,
-                pyo.TerminationCondition.feasible,
+            m = build_player_mpec(
+                r, sets, params, theta,
+                eps=eps,
+                eps_u=eps_u,
+                price_sign=price_sign,
             )
+
+            res = solver.solve(m, tee=False, load_solutions=False)
+
+            status = res.solver.status
+            tc = res.solver.termination_condition
+
+            ok = (status == SolverStatus.ok) and (tc in (
+                TerminationCondition.optimal,
+                TerminationCondition.locallyOptimal,
+                TerminationCondition.feasible,
+            ))
+
             if not ok:
-                hist.append({"iter": it, "region": r, "accepted": False, "status": str(tc)})
+                hist.append(
+                    {"iter": it, "region": r, "accepted": False, "status": str(status), "term": str(tc)}
+                )
                 if verbose:
-                    print(f"[iter {it:>2}] player={r}  SOLVE FAILED  status={tc}")
+                    print(f"[iter {it:>2}] player={r}  SOLVE FAILED  status={status} term={tc}")
                 continue
 
-            # snapshot key info before updating theta
+            m.solutions.load_from(res)
+
             lam_vals = {rr: _val(m.lam[rr]) for rr in sets.R} if hasattr(m, "lam") else {}
             ulp_val = _val(m.ULP_OBJ)
             llp_val = _val(m.LLP_OBJ.expr) if hasattr(m, "LLP_OBJ") else float("nan")
@@ -154,12 +182,10 @@ def solve_gauss_seidel(
             if verbose:
                 _print_player_block(it=it, player=r, m=m, sets=sets)
 
-            # Best-response strategic vars (shared vars in the model now)
             br_qman = _val(m.q_man[r])
             br_d = _val(m.d_offer[r])
             br_tau = {(e, r): _val(m.tau[e, r]) for e in sets.R if e != r}
 
-            # damped update
             def upd(old, new):
                 return old + damping * (new - old)
 
@@ -175,7 +201,6 @@ def solve_gauss_seidel(
 
             for (e, rr) in br_tau:
                 old_t = theta.tau[(e, rr)]
-                # guard against numerical negatives / overshoots when fixing taus
                 projected_tau = max(0.0, min(params.tau_ub[(e, rr)], br_tau[(e, rr)]))
                 theta.tau[(e, rr)] = upd(old_t, projected_tau)
                 max_change = max(max_change, abs(theta.tau[(e, rr)] - old_t))
@@ -185,7 +210,8 @@ def solve_gauss_seidel(
                     "iter": it,
                     "region": r,
                     "accepted": True,
-                    "status": str(tc),
+                    "status": str(status),
+                    "term": str(tc),
                     "lambda": lam_vals,
                     "ulp_obj": ulp_val,
                     "llp_obj": llp_val,
@@ -195,7 +221,6 @@ def solve_gauss_seidel(
                 }
             )
 
-        # end of one full GS sweep
         iters_done = it + 1
         if verbose:
             print(f"\n=== end GS iter {it}: max_change={max_change:.6g} (tol={tol}) ===")
