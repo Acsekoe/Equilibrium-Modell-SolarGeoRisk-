@@ -6,12 +6,22 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from numbers import Real
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
+
+DECIMALS = 3
+
+def _round_excel_value(v: Any, ndigits: int = DECIMALS) -> Any:
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, Real):
+        return round(v, ndigits)
+    return v
 
 
 def _project_root_from_here(here: Path) -> Path:
@@ -103,7 +113,8 @@ def _write_kv_sheet(wb: Workbook, name: str, items: Sequence[Tuple[str, Any]]) -
     ws = wb.create_sheet(title=name)
     ws.append(["key", "value"])
     for k, v in items:
-        ws.append([k, v if isinstance(v, (int, float, str, bool)) or v is None else _safe_json(v)])
+        val = v if isinstance(v, (int, float, str, bool)) or v is None else _safe_json(v)
+        ws.append([k, _round_excel_value(val)])
     _make_header(ws)
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
@@ -131,7 +142,7 @@ def _flatten_theta(sets: Any, theta: Any) -> Tuple[List[List[Any]], List[List[An
 
 def _write_table(ws, table: List[List[Any]]) -> None:
     for row in table:
-        ws.append(row)
+        ws.append([_round_excel_value(v) for v in row])
     _make_header(ws)
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
@@ -184,7 +195,7 @@ def _write_history_sheet(wb: Workbook, name: str, sets: Any, hist: List[dict]) -
                 v = _safe_json(v)
             out.append(v)
 
-        ws.append(out)
+        ws.append([_round_excel_value(v) for v in out])
 
     _make_header(ws)
     ws.auto_filter.ref = ws.dimensions

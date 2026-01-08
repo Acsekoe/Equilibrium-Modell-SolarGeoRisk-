@@ -48,7 +48,15 @@ def build_llp_primal(sets: Sets, params: Params, theta: Theta) -> pyo.ConcreteMo
         dom  = sum(mm.c_mod_dom_use[r] * mm.x_dom[r] for r in mm.R)
         ship = sum(mm.c_ship[e, r] * (1 + mm.tau[e, r]) * mm.x_flow[e, r]
                    for (e, r) in mm.RR)
-        pen  = sum(mm.c_pen_llp[r] * mm.u_dem[r] for r in mm.R)
+        def smooth_pos(x, eps):
+            # smooth approximation of max(x, 0)
+            return 0.5 * (x + pyo.sqrt(x*x + eps*eps))
+
+        u_tol = 1e-6   # buffer (pick something meaningful for your scale)
+        eps_pen = 1e-8 # smoothing for the kink at 0 (can be bigger than 1e-12)
+
+        pen = sum(mm.c_pen_llp[r] * smooth_pos(mm.u_dem[r] - u_tol, eps_pen) for r in mm.R)
+
         return man + dom + ship + pen
 
     m.LLP_OBJ = pyo.Objective(rule=llp_obj, sense=pyo.minimize)

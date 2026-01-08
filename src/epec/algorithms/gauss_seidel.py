@@ -126,13 +126,23 @@ def solve_gauss_seidel(
     theta0: Theta,
     max_iter: int = 30,
     tol: float = 1e-4,
-    eps: float = 1e-4,
-    eps_u: float = 1e-12,
-    damping: float = 0.7,
+    eps: float = 1e-7,
+    eps_u: float = 1e-7,
+    damping: float = 0.8,
     price_sign: float = -1.0,
     ipopt_options: Dict[str, float] | None = None,
     verbose: bool = True,
+    run_cfg: Dict[str, float] | None = None,
 ) -> Tuple[Theta, List[dict]]:
+
+    if run_cfg:
+        # Allow a single config dict (e.g., from run_small.py) to override defaults.
+        max_iter = int(run_cfg.get("max_iter", max_iter))
+        tol = float(run_cfg.get("tol", tol))
+        eps = float(run_cfg.get("eps", eps))
+        eps_u = float(run_cfg.get("eps_u", eps_u))
+        damping = float(run_cfg.get("damping", damping))
+        price_sign = float(run_cfg.get("price_sign", price_sign))
 
     theta = theta0
     solver = pyo.SolverFactory("ipopt")

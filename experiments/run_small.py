@@ -17,10 +17,10 @@ if __name__ == "__main__":
 
     # ---- run config (THIS is where eps / eps_u belong) ----
     run_cfg = {
-        "max_iter": 4,
+        "max_iter": 10,
         "tol": 1e-4,
-        "eps": 1e-12,
-        "eps_u": 1e-12,
+        "eps": 1e-7,
+        "eps_u": 1e-7,
         "damping": 0.8,
         "price_sign": -1.0,
     }
@@ -36,12 +36,7 @@ if __name__ == "__main__":
             sets=sets,
             params=params,
             theta0=theta0,
-            max_iter=run_cfg["max_iter"],
-            tol=run_cfg["tol"],
-            eps=run_cfg["eps"],
-            eps_u=run_cfg["eps_u"],
-            damping=run_cfg["damping"],
-            price_sign=run_cfg["price_sign"],
+            run_cfg=run_cfg,
             ipopt_options=ipopt_opts,
             verbose=True,
         )
@@ -63,3 +58,5 @@ if __name__ == "__main__":
     print("d_offer:", theta_star.d_offer)
     print("tau (all arcs):\n" + _fmt_arcs(theta_star.tau))
     print(f"\nSaved Excel results to: {xlsx_path}")
+
+
