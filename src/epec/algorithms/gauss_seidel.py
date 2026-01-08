@@ -139,7 +139,6 @@ def solve_gauss_seidel(
     eps_pen = 1e-8
 
     if run_cfg:
-        # Allow a single config dict (e.g., from run_small.py) to override defaults.
         max_iter = int(run_cfg.get("max_iter", max_iter))
         tol = float(run_cfg.get("tol", tol))
         eps = float(run_cfg.get("eps", eps))
@@ -192,13 +191,29 @@ def solve_gauss_seidel(
 
             m.solutions.load_from(res)
 
-            lam_vals = {rr: _val(m.lam[rr]) for rr in sets.R} if hasattr(m, "lam") else {}
+            # --- Scalars / objectives
             ulp_val = _val(m.ULP_OBJ)
             llp_val = _val(m.LLP_OBJ.expr) if hasattr(m, "LLP_OBJ") else float("nan")
+
+            # --- Per-region dicts (for Excel history)
+            lam_vals = {rr: _val(m.lam[rr]) for rr in sets.R} if hasattr(m, "lam") else {}
+            alp_vals = {rr: _val(m.alp[rr]) for rr in sets.R} if hasattr(m, "alp") else {}
+            u_dem_vals = {rr: _val(m.u_dem[rr]) for rr in sets.R} if hasattr(m, "u_dem") else {}
+            nu_udem_vals = {rr: _val(m.nu_udem[rr]) for rr in sets.R} if hasattr(m, "nu_udem") else {}
+
+            x_man_vals = {rr: _val(m.x_man[rr]) for rr in sets.R} if hasattr(m, "x_man") else {}
+            x_dom_vals = {rr: _val(m.x_dom[rr]) for rr in sets.R} if hasattr(m, "x_dom") else {}
+            x_dem_vals = {rr: _val(m.x_dem[rr]) for rr in sets.R} if hasattr(m, "x_dem") else {}
+
+            # --- Per-arc dicts
+            x_flow_vals = {(e, rr): _val(m.x_flow[e, rr]) for (e, rr) in sets.RR} if hasattr(m, "x_flow") else {}
+
+            max_u_dem_val = max(u_dem_vals.values()) if u_dem_vals else float("nan")
 
             if verbose:
                 _print_player_block(it=it, player=r, m=m, sets=sets)
 
+            # --- Best response for this player (Gauss-Seidel update)
             br_qman = _val(m.q_man[r])
             br_d = _val(m.d_offer[r])
             br_tau = {(e, r): _val(m.tau[e, r]) for e in sets.R if e != r}
@@ -222,6 +237,7 @@ def solve_gauss_seidel(
                 theta.tau[(e, rr)] = upd(old_t, projected_tau)
                 max_change = max(max_change, abs(theta.tau[(e, rr)] - old_t))
 
+            # --- Store history row (NOW includes what Excel needs)
             hist.append(
                 {
                     "iter": it,
@@ -229,9 +245,21 @@ def solve_gauss_seidel(
                     "accepted": True,
                     "status": str(status),
                     "term": str(tc),
-                    "lambda": lam_vals,
+
                     "ulp_obj": ulp_val,
                     "llp_obj": llp_val,
+
+                    "lambda": lam_vals,
+                    "alp": alp_vals,
+                    "u_dem": u_dem_vals,
+                    "nu_udem": nu_udem_vals,
+                    "max_u_dem": max_u_dem_val,
+
+                    "x_man": x_man_vals,
+                    "x_dom": x_dom_vals,
+                    "x_dem": x_dem_vals,
+                    "x_flow": x_flow_vals,
+
                     "br_q_man": br_qman,
                     "br_d_offer": br_d,
                     "br_tau_in": {k: br_tau[k] for k in br_tau},
@@ -248,3 +276,4 @@ def solve_gauss_seidel(
     if verbose:
         print(f"\n=== Gauss-Seidel finished: {iters_done} iteration(s) executed ===")
     return theta, hist
+

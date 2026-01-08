@@ -55,21 +55,25 @@ def build_player_mpec(
     # Deactivate LLP objective: solve ULP objective with KKT constraints
     m.LLP_OBJ.deactivate()
 
+    def smooth_pos(x, eps):
+            return 0.5 * (x + pyo.sqrt(x*x + eps*eps))
+
     # Regional LLP cost component C_r^{LLP}(x,tau)
     def C_llp_r(mm):
         man  = params.c_mod_man[r] * mm.x_man[r]
         dom  = params.c_mod_dom_use[r] * mm.x_dom[r]
         ship = sum(params.c_ship[e, r] * (1 + mm.tau[e, r]) * mm.x_flow[e, r]
                    for e in R if e != r)
-        pen  = params.c_pen_llp[r] * mm.u_dem[r]
+
+        pen = params.c_pen_llp[r] * smooth_pos(mm.u_dem[r] - u_tol, eps_pen)
         return man + dom + ship + pen
 
     def ulp_obj(mm):
         # revenue from exports valued at importer's module-balance dual (your price signal)
         export_rev = sum(price_sign * mm.lam[i] * mm.x_flow[r, i] for i in R if i != r)
 
-        # upper-level penalty: still based on served demand shortfall vs exogenous hat
-        unmet_pen  = params.c_pen_ulp[r] * (params.D_hat[r] - mm.x_dem[r])
+        # upper-level penalty on unmet offered demand (u_dem = d_offer - x_dem), smoothed like LLP
+        unmet_pen  = params.c_pen_ulp[r] * smooth_pos(mm.u_dem[r] - u_tol, eps_pen)
 
         # tiny regularization on capacity (prevents some degenerate behavior)
         cap_cost = 1e-3 * mm.q_man[r]
