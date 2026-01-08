@@ -5,7 +5,7 @@ from epec.core.params import Params
 from epec.core.theta import Theta
 
 
-def build_llp_primal(sets: Sets, params: Params, theta: Theta) -> pyo.ConcreteModel:
+def build_llp_primal(sets: Sets, params: Params, theta: Theta, u_tol: float, eps_pen: float) -> pyo.ConcreteModel:
     """
     LLP (follower) primal:
 
@@ -51,9 +51,6 @@ def build_llp_primal(sets: Sets, params: Params, theta: Theta) -> pyo.ConcreteMo
         def smooth_pos(x, eps):
             # smooth approximation of max(x, 0)
             return 0.5 * (x + pyo.sqrt(x*x + eps*eps))
-
-        u_tol = 1e-6   # buffer (pick something meaningful for your scale)
-        eps_pen = 1e-8 # smoothing for the kink at 0 (can be bigger than 1e-12)
 
         pen = sum(mm.c_pen_llp[r] * smooth_pos(mm.u_dem[r] - u_tol, eps_pen) for r in mm.R)
 

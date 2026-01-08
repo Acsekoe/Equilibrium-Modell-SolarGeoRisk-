@@ -15,12 +15,14 @@ def _fmt_arcs(d):
 if __name__ == "__main__":
     sets, params, theta0 = make_example()
 
-    # ---- run config (THIS is where eps / eps_u belong) ----
+    # ---- run config (THIS is where tol/eps/eps_u/u_tol/eps_pen/damping belong) ----
     run_cfg = {
         "max_iter": 10,
         "tol": 1e-4,
         "eps": 1e-7,
         "eps_u": 1e-7,
+        "u_tol": 1e-6,
+        "eps_pen": 1e-8,
         "damping": 0.8,
         "price_sign": -1.0,
     }

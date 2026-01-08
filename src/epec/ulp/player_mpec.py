@@ -15,6 +15,8 @@ def build_player_mpec(
     theta_fixed: Theta,
     eps: float = 1e-4,
     eps_u: float = 1e-12,
+    u_tol: float = 1e-6,
+    eps_pen: float = 1e-8,
     price_sign: float = -1.0,
 ) -> pyo.ConcreteModel:
     """
@@ -28,7 +30,7 @@ def build_player_mpec(
     r = region
 
     # LLP core with strategic quantities as Vars (q_man/d_offer/tau)
-    m = build_llp_primal(sets, params, theta_fixed)
+    m = build_llp_primal(sets, params, theta_fixed, u_tol=u_tol, eps_pen=eps_pen)
 
     # --- Fix OTHER players' strategic vars; FREE this player's with hat-bounds ---
     for s in R:
@@ -48,7 +50,7 @@ def build_player_mpec(
             m.tau[e, rr].fix(theta_fixed.tau[(e, rr)])
 
     # Add KKT of LLP (introduces lam, pi, alp, mu, nu, etc.)
-    add_llp_kkt(m, sets, eps=eps, eps_u=eps_u)
+    add_llp_kkt(m, sets, eps=eps, eps_u=eps_u, u_tol=u_tol, eps_pen=eps_pen)
 
     # Deactivate LLP objective: solve ULP objective with KKT constraints
     m.LLP_OBJ.deactivate()

@@ -135,12 +135,17 @@ def solve_gauss_seidel(
     run_cfg: Dict[str, float] | None = None,
 ) -> Tuple[Theta, List[dict]]:
 
+    u_tol = 1e-6
+    eps_pen = 1e-8
+
     if run_cfg:
         # Allow a single config dict (e.g., from run_small.py) to override defaults.
         max_iter = int(run_cfg.get("max_iter", max_iter))
         tol = float(run_cfg.get("tol", tol))
         eps = float(run_cfg.get("eps", eps))
         eps_u = float(run_cfg.get("eps_u", eps_u))
+        u_tol = float(run_cfg.get("u_tol", u_tol))
+        eps_pen = float(run_cfg.get("eps_pen", eps_pen))
         damping = float(run_cfg.get("damping", damping))
         price_sign = float(run_cfg.get("price_sign", price_sign))
 
@@ -161,6 +166,8 @@ def solve_gauss_seidel(
                 r, sets, params, theta,
                 eps=eps,
                 eps_u=eps_u,
+                u_tol=u_tol,
+                eps_pen=eps_pen,
                 price_sign=price_sign,
             )
 

@@ -9,8 +9,13 @@ from epec.llp.kkt import add_llp_kkt
 if __name__ == "__main__":
     sets, params, theta0 = make_example()
 
-    m = build_llp_primal(sets, params, theta0)
-    add_llp_kkt(m, sets, eps=1e-6)
+    eps = 1e-6
+    eps_u = 1e-12
+    u_tol = 1e-6
+    eps_pen = 1e-8
+
+    m = build_llp_primal(sets, params, theta0, u_tol=u_tol, eps_pen=eps_pen)
+    add_llp_kkt(m, sets, eps=eps, eps_u=eps_u, u_tol=u_tol, eps_pen=eps_pen)
 
     solver = pyo.SolverFactory("ipopt")
     solver.options["tol"] = 1e-8

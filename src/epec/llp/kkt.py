@@ -17,20 +17,27 @@ def add_fb_comp(m: pyo.ConcreteModel, a, b, eps: float, name: str) -> None:
     setattr(m, f"{name}_b_nonneg", pyo.Constraint(expr=b >= 0))
     setattr(m, f"{name}_fb", pyo.Constraint(expr=fb_smooth(a, b, eps) == 0))
 
+def d_smooth_pos(x, eps):
+    return 0.5 * (1 + x / pyo.sqrt(x*x + eps*eps))
+
 
 def add_llp_kkt(
     m: pyo.ConcreteModel,
     sets: Sets,
-    eps: float = 1e-4,
-    eps_u: float = 1e-12,
+    eps: float,
+    eps_u: float,
+    u_tol: float,
+    eps_pen: float,
 ) -> None:
     """
     KKT embedding for LLP with:
         x_dem[r] + u_dem[r] = d_offer[r]
         penalty on u_dem
 
-    eps:   default smoothing for "normal" complementarity pairs
+    eps:   smoothing for "normal" complementarity pairs
     eps_u: tighter smoothing for u_dem ⟂ nu_udem (critical when c_pen_llp is huge)
+    u_tol: buffer for unmet-demand penalty (shifts the kink at 0)
+    eps_pen: smoothing for the unmet-demand penalty kink
     """
     R, RR = sets.R, sets.RR
 
@@ -77,10 +84,17 @@ def add_llp_kkt(
     )
 
     # d/du_dem[r]: c_pen_llp[r] + alp[r] - nu_udem[r] = 0
+
     m.stat_udem = pyo.Constraint(
         m.R,
-        rule=lambda mm, r: mm.c_pen_llp[r] + mm.alp[r] - mm.nu_udem[r] == 0
+        rule=lambda mm, r: (
+            mm.c_pen_llp[r] * d_smooth_pos(mm.u_dem[r] - u_tol, eps_pen)
+            + mm.alp[r]
+            - mm.nu_udem[r]
+            == 0
+        )
     )
+
 
     # d/dx_flow[e,r]: c_ship[e,r]*(1+tau[e,r]) + lam[r] - pi[e] - nu_xflow[e,r] = 0
     m.stat_xflow = pyo.Constraint(
