@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
+
 import pyomo.environ as pyo
 from pyomo.opt import SolverStatus, TerminationCondition
 
@@ -15,229 +16,120 @@ def _val(x, default: float = float("nan")) -> float:
     return default if v is None else float(v)
 
 
-def _fmt_map(d: Dict, key_order=None, width: int = 12, prec: int = 6) -> str:
-    if key_order is None:
-        key_order = list(d.keys())
-    parts = []
-    for k in key_order:
-        v = d[k]
-        try:
-            s = f"{float(v):{width},.{prec}f}"
-        except Exception:
-            s = str(v)
-        parts.append(f"{k}: {s}")
-    return "{ " + ", ".join(parts) + " }"
-
-
-def _fmt_arcs(
-    d: Dict[Tuple[str, str], float],
-    arc_order: List[Tuple[str, str]] | None = None,
-    width: int = 12,
-    prec: int = 6,
-) -> str:
-    if arc_order is None:
-        arc_order = list(d.keys())
-    lines = []
-    for (e, r) in arc_order:
-        v = d[(e, r)]
-        lines.append(f"    {e}->{r}: {float(v):{width},.{prec}f}")
-    return "\n".join(lines)
-
-
-def _print_player_block(it: int, player: str, m: pyo.ConcreteModel, sets: Sets) -> None:
-    R = list(sets.R)
-    RR = list(sets.RR)
-
-    ulp_obj = _val(m.ULP_OBJ)
-    llp_obj = _val(m.LLP_OBJ.expr) if hasattr(m, "LLP_OBJ") else float("nan")
-
-    q_man = {r: _val(m.q_man[r]) for r in R}
-    d_offer = {r: _val(m.d_offer[r]) for r in R}
-    tau = {(e, r): _val(m.tau[e, r]) for (e, r) in RR}
-
-    x_man = {r: _val(m.x_man[r]) for r in R}
-    x_dom = {r: _val(m.x_dom[r]) for r in R}
-    x_dem = {r: _val(m.x_dem[r]) for r in R}
-    u_dem = {r: _val(m.u_dem[r]) for r in R} if hasattr(m, "u_dem") else {}
-    dem_gap = {r: _val(m.d_offer[r] - m.x_dem[r]) for r in R} if hasattr(m, "d_offer") else {}
-    x_flow = {(e, r): _val(m.x_flow[e, r]) for (e, r) in RR}
-
-    lam = {r: _val(m.lam[r]) for r in R} if hasattr(m, "lam") else {}
-    pi = {r: _val(m.pi[r]) for r in R} if hasattr(m, "pi") else {}
-    nu_udem = {r: _val(m.nu_udem[r]) for r in R} if hasattr(m, "nu_udem") else {}
-
-    mod_res = {}
-    prod_res = {}
-    dem_link_res = {}
-    if hasattr(m, "mod_balance"):
-        for r in R:
-            mod_res[r] = _val(m.mod_balance[r].body - m.mod_balance[r].lower)
-    if hasattr(m, "prod_balance"):
-        for r in R:
-            prod_res[r] = _val(m.prod_balance[r].body - m.prod_balance[r].lower)
-    if hasattr(m, "dem_link"):
-        for r in R:
-            dem_link_res[r] = _val(m.dem_link[r].body - m.dem_link[r].lower)
-
-    sep = "-" * 78
-    print(sep)
-    print(f"[iter {it:>2}] player={player} | ULP_OBJ={ulp_obj:,.6f} | LLP_OBJ(expr)={llp_obj:,.6f}")
-    print(sep)
-
-    print("Upper-level decisions (all regions):")
-    print("  q_man:", _fmt_map(q_man, key_order=R))
-    print("  d_offer:", _fmt_map(d_offer, key_order=R))
-    print("  tau (arcs):")
-    print(_fmt_arcs(tau, arc_order=RR))
-
-    print("\nLower-level variables / flows:")
-    print("  x_man:", _fmt_map(x_man, key_order=R))
-    print("  x_dom:", _fmt_map(x_dom, key_order=R))
-    print("  x_dem:", _fmt_map(x_dem, key_order=R))
-    if u_dem:
-        print("  u_dem:", _fmt_map(u_dem, key_order=R))
-        print(f"  max_u_dem: {max(u_dem.values()):.6g}")
-    if dem_gap:
-        print("  d_offer - x_dem:", _fmt_map(dem_gap, key_order=R, width=12, prec=6))
-    print("  x_flow (arcs):")
-    print(_fmt_arcs(x_flow, arc_order=RR))
-
-    print("\nDual variables (LLP equality constraints):")
-    if lam:
-        print("  lam (module balance):", _fmt_map(lam, key_order=R))
-    if pi:
-        print("  pi  (production balance):", _fmt_map(pi, key_order=R))
-    if nu_udem:
-        print("  nu_udem (u_dem >= 0):", _fmt_map(nu_udem, key_order=R))
-
-    print("\nResiduals (should be ~0):")
-    if mod_res:
-        print("  mod_balance:", _fmt_map(mod_res, key_order=R, width=12, prec=3))
-    if prod_res:
-        print("  prod_balance:", _fmt_map(prod_res, key_order=R, width=12, prec=3))
-    if dem_link_res:
-        print("  dem_link (x_dem+u_dem=d_offer):", _fmt_map(dem_link_res, key_order=R, width=12, prec=3))
-    print(sep)
-
-
 def solve_gauss_seidel(
     sets: Sets,
     params: Params,
     theta0: Theta,
     max_iter: int = 30,
-    tol: float = 1e-4,
-    eps: float = 1e-7,
-    eps_u: float = 1e-7,
+    tol: float = 1e-4,          # absolute tolerance (diagnostic)
+    rel_tol: float = 1e-6,      # normalized convergence criterion (stop condition)
     damping: float = 0.8,
-    price_sign: float = -1.0,
-    ipopt_options: Dict[str, float] | None = None,
+    gurobi_options: Dict[str, float] | None = None,
     verbose: bool = True,
     run_cfg: Dict[str, float] | None = None,
 ) -> Tuple[Theta, List[dict]]:
 
-    u_tol = 1e-6
-    eps_pen = 1e-8
-
     if run_cfg:
         max_iter = int(run_cfg.get("max_iter", max_iter))
         tol = float(run_cfg.get("tol", tol))
-        eps = float(run_cfg.get("eps", eps))
-        eps_u = float(run_cfg.get("eps_u", eps_u))
-        u_tol = float(run_cfg.get("u_tol", u_tol))
-        eps_pen = float(run_cfg.get("eps_pen", eps_pen))
+        rel_tol = float(run_cfg.get("rel_tol", rel_tol))
         damping = float(run_cfg.get("damping", damping))
-        price_sign = float(run_cfg.get("price_sign", price_sign))
 
-    theta = theta0
-    solver = pyo.SolverFactory("ipopt")
-    if ipopt_options:
-        for k, v in ipopt_options.items():
+    # MPCC uses bilinear complementarity constraints a*b == 0 -> nonconvex QCP/QCQP
+    solver = pyo.SolverFactory("gurobi_direct")
+    solver.options["NonConvex"] = 2
+    solver.options["OutputFlag"] = 1 if verbose else 0
+    if gurobi_options:
+        for k, v in gurobi_options.items():
             solver.options[k] = v
 
+    theta = theta0
     hist: List[dict] = []
     iters_done = 0
 
+    ok_terms = {
+        TerminationCondition.optimal,
+        TerminationCondition.locallyOptimal,
+        TerminationCondition.feasible,
+    }
+
+    def upd(old: float, new: float) -> float:
+        return old + damping * (new - old)
+
+    def theta_vec(th: Theta) -> List[float]:
+        v: List[float] = []
+        for rr in sets.R:
+            v.extend([float(th.q_man[rr]), float(th.d_mod[rr]), float(th.sigma[rr]), float(th.beta[rr])])
+        return v
+
+    def inf_norm(v: List[float]) -> float:
+        return max(abs(x) for x in v) if v else 0.0
+
+    def rel_change_inf(old: List[float], new: List[float]) -> float:
+        denom = max(1.0, inf_norm(old))
+        diff = [new[i] - old[i] for i in range(len(old))]
+        return inf_norm(diff) / denom
+
     for it in range(max_iter):
-        max_change = 0.0
+        theta_old_vec = theta_vec(theta)
+        max_change_abs = 0.0
+        any_failed = False
 
+        # --- sweep over players ---
         for r in sets.R:
-            m = build_player_mpec(
-                r, sets, params, theta,
-                eps=eps,
-                eps_u=eps_u,
-                u_tol=u_tol,
-                eps_pen=eps_pen,
-                price_sign=price_sign,
-            )
+            m = build_player_mpec(r, sets, params, theta)
 
-            res = solver.solve(m, tee=False, load_solutions=False)
+            res = solver.solve(m, tee=verbose, load_solutions=False)
 
             status = res.solver.status
             tc = res.solver.termination_condition
+            msg = getattr(res.solver, "message", None)
 
-            ok = (status == SolverStatus.ok) and (tc in (
-                TerminationCondition.optimal,
-                TerminationCondition.locallyOptimal,
-                TerminationCondition.feasible,
-            ))
-
+            ok = (status == SolverStatus.ok) and (tc in ok_terms)
             if not ok:
+                any_failed = True
                 hist.append(
-                    {"iter": it, "region": r, "accepted": False, "status": str(status), "term": str(tc)}
+                    {
+                        "iter": it,
+                        "region": r,
+                        "accepted": False,
+                        "status": str(status),
+                        "term": str(tc),
+                        "msg": str(msg),
+                    }
                 )
                 if verbose:
                     print(f"[iter {it:>2}] player={r}  SOLVE FAILED  status={status} term={tc}")
                 continue
 
+            # load solution once
             m.solutions.load_from(res)
 
-            # --- Scalars / objectives
-            ulp_val = _val(m.ULP_OBJ)
-            llp_val = _val(m.LLP_OBJ.expr) if hasattr(m, "LLP_OBJ") else float("nan")
+            # best-response (solved player only)
+            br_q = _val(m.q_man[r])
+            br_d = _val(m.d_mod[r])
+            br_sigma = _val(m.sigma[r])
+            br_beta = _val(m.beta[r])
 
-            # --- Per-region dicts (for Excel history)
-            lam_vals = {rr: _val(m.lam[rr]) for rr in sets.R} if hasattr(m, "lam") else {}
-            alp_vals = {rr: _val(m.alp[rr]) for rr in sets.R} if hasattr(m, "alp") else {}
-            u_dem_vals = {rr: _val(m.u_dem[rr]) for rr in sets.R} if hasattr(m, "u_dem") else {}
-            nu_udem_vals = {rr: _val(m.nu_udem[rr]) for rr in sets.R} if hasattr(m, "nu_udem") else {}
+            old_q, old_d, old_s, old_b = theta.q_man[r], theta.d_mod[r], theta.sigma[r], theta.beta[r]
 
-            x_man_vals = {rr: _val(m.x_man[rr]) for rr in sets.R} if hasattr(m, "x_man") else {}
-            x_dom_vals = {rr: _val(m.x_dom[rr]) for rr in sets.R} if hasattr(m, "x_dom") else {}
-            x_dem_vals = {rr: _val(m.x_dem[rr]) for rr in sets.R} if hasattr(m, "x_dem") else {}
+            theta.q_man[r] = upd(old_q, br_q)
+            theta.d_mod[r] = upd(old_d, br_d)
+            theta.sigma[r] = upd(old_s, br_sigma)
+            theta.beta[r] = upd(old_b, br_beta)
 
-            # --- Per-arc dicts
-            x_flow_vals = {(e, rr): _val(m.x_flow[e, rr]) for (e, rr) in sets.RR} if hasattr(m, "x_flow") else {}
-
-            max_u_dem_val = max(u_dem_vals.values()) if u_dem_vals else float("nan")
-
-            if verbose:
-                _print_player_block(it=it, player=r, m=m, sets=sets)
-
-            # --- Best response for this player (Gauss-Seidel update)
-            br_qman = _val(m.q_man[r])
-            br_d = _val(m.d_offer[r])
-            br_tau = {(e, r): _val(m.tau[e, r]) for e in sets.R if e != r}
-
-            def upd(old, new):
-                return old + damping * (new - old)
-
-            old = (theta.q_man[r], theta.d_offer[r])
-            theta.q_man[r] = upd(theta.q_man[r], br_qman)
-            theta.d_offer[r] = upd(theta.d_offer[r], br_d)
-
-            max_change = max(
-                max_change,
-                abs(theta.q_man[r] - old[0]),
-                abs(theta.d_offer[r] - old[1]),
+            max_change_abs = max(
+                max_change_abs,
+                abs(theta.q_man[r] - old_q),
+                abs(theta.d_mod[r] - old_d),
+                abs(theta.sigma[r] - old_s),
+                abs(theta.beta[r] - old_b),
             )
 
-            for (e, rr) in br_tau:
-                old_t = theta.tau[(e, rr)]
-                projected_tau = max(0.0, min(params.tau_ub[(e, rr)], br_tau[(e, rr)]))
-                theta.tau[(e, rr)] = upd(old_t, projected_tau)
-                max_change = max(max_change, abs(theta.tau[(e, rr)] - old_t))
+            # --- log full snapshot for this solve (THIS is what your Excel writer needs) ---
+            R = list(sets.R)
+            A = list(sets.A)
 
-            # --- Store history row (NOW includes what Excel needs)
             hist.append(
                 {
                     "iter": it,
@@ -245,35 +137,66 @@ def solve_gauss_seidel(
                     "accepted": True,
                     "status": str(status),
                     "term": str(tc),
+                    "msg": str(msg),
 
-                    "ulp_obj": ulp_val,
-                    "llp_obj": llp_val,
+                    "ulp_obj": _val(m.ULP_OBJ),
+                    "lambda": _val(m.lam) if hasattr(m, "lam") else float("nan"),
 
-                    "lambda": lam_vals,
-                    "alp": alp_vals,
-                    "u_dem": u_dem_vals,
-                    "nu_udem": nu_udem_vals,
-                    "max_u_dem": max_u_dem_val,
+                    # strategic snapshot (all regions as seen in this solve)
+                    "q_man": {rr: _val(m.q_man[rr]) for rr in R},
+                    "d_mod": {rr: _val(m.d_mod[rr]) for rr in R},
+                    "sigma": {rr: _val(m.sigma[rr]) for rr in R},
+                    "beta":  {rr: _val(m.beta[rr]) for rr in R},
 
-                    "x_man": x_man_vals,
-                    "x_dom": x_dom_vals,
-                    "x_dem": x_dem_vals,
-                    "x_flow": x_flow_vals,
+                    # primal outcomes
+                    "x_man": {rr: _val(m.x_man[rr]) for rr in R} if hasattr(m, "x_man") else {},
+                    "x_dem": {rr: _val(m.x_dem[rr]) for rr in R} if hasattr(m, "x_dem") else {},
+                    "x_mod": {(e, rr): _val(m.x_mod[e, rr]) for (e, rr) in A} if hasattr(m, "x_mod") else {},
 
-                    "br_q_man": br_qman,
-                    "br_d_offer": br_d,
-                    "br_tau_in": {k: br_tau[k] for k in br_tau},
+                    # key duals (optional but useful)
+                    "pi": {rr: _val(m.pi[rr]) for rr in R} if hasattr(m, "pi") else {},
+                    "mu": {rr: _val(m.mu[rr]) for rr in R} if hasattr(m, "mu") else {},
+                    "alpha": {rr: _val(m.alpha[rr]) for rr in R} if hasattr(m, "alpha") else {},
+                    "phi": {rr: _val(m.phi[rr]) for rr in R} if hasattr(m, "phi") else {},
+                    "gamma": {(e, rr): _val(m.gamma[e, rr]) for (e, rr) in A} if hasattr(m, "gamma") else {},
+
+                    # player BR scalars (handy columns)
+                    "br_q_man": br_q,
+                    "br_d_mod": br_d,
+                    "br_sigma": br_sigma,
+                    "br_beta": br_beta,
                 }
             )
 
         iters_done = it + 1
-        if verbose:
-            print(f"\n=== end GS iter {it}: max_change={max_change:.6g} (tol={tol}) ===")
 
-        if max_change < tol:
+        if any_failed:
+            raise RuntimeError(f"Gauss–Seidel aborted in iter {it}: at least one player solve failed.")
+
+        theta_new_vec = theta_vec(theta)
+        rel_inf = rel_change_inf(theta_old_vec, theta_new_vec)
+
+        # --- log sweep summary row (for max_change / rel_inf in Excel) ---
+        hist.append(
+            {
+                "iter": it,
+                "region": "__SWEEP__",
+                "accepted": True,
+                "abs_max_change": float(max_change_abs),
+                "rel_inf": float(rel_inf),
+            }
+        )
+
+        if verbose:
+            print(
+                f"\n=== end GS iter {it}: abs_max_change={max_change_abs:.6g}, rel_inf={rel_inf:.6g} "
+                f"(abs_tol={tol}, rel_tol={rel_tol}) ==="
+            )
+
+        if rel_inf < rel_tol:
             break
 
     if verbose:
         print(f"\n=== Gauss-Seidel finished: {iters_done} iteration(s) executed ===")
-    return theta, hist
 
+    return theta, hist

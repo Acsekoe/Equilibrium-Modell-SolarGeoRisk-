@@ -1,121 +1,127 @@
 from __future__ import annotations
+
 import pyomo.environ as pyo
+
 from epec.core.sets import Sets
 
 
-def fb_smooth(a, b, eps):
-    # Fischer–Burmeister smoothing: phi_eps(a,b) = sqrt(a^2+b^2+eps) - a - b
-    return pyo.sqrt(a*a + b*b + eps) - a - b
+def _add_comp_product(m: pyo.ConcreteModel, a, b, name: str) -> None:
+    """Hard complementarity via a*b = 0 with a>=0, b>=0.
 
-
-def add_fb_comp(m: pyo.ConcreteModel, a, b, eps: float, name: str) -> None:
-    """
-    Adds smoothed complementarity:
-        a >= 0, b >= 0, fb_smooth(a,b,eps) = 0
+    NOTE:
+      - a>=0 is enforced here.
+      - b>=0 must already be ensured by primal feasibility and correct slack orientation.
     """
     setattr(m, f"{name}_a_nonneg", pyo.Constraint(expr=a >= 0))
     setattr(m, f"{name}_b_nonneg", pyo.Constraint(expr=b >= 0))
-    setattr(m, f"{name}_fb", pyo.Constraint(expr=fb_smooth(a, b, eps) == 0))
-
-def d_smooth_pos(x, eps):
-    return 0.5 * (1 + x / pyo.sqrt(x*x + eps*eps))
+    setattr(m, f"{name}_prod", pyo.Constraint(expr=a * b == 0))
 
 
 def add_llp_kkt(
     m: pyo.ConcreteModel,
     sets: Sets,
-    eps: float,
-    eps_u: float,
-    u_tol: float,
-    eps_pen: float,
+    M_dual: float = 5000.0,
+    M_free: float = 5000.0,
+    M_price: float = 5000.0,  # kept for API compatibility; not used after fixing lam
 ) -> None:
+    """Adds KKT conditions for the LaTeX LLP (hard MPCC with bounded duals).
+
+    Requires `m` already has:
+      Sets: m.R, m.A (A includes domestic arcs!)
+      Vars: x_mod[e,r], x_man[r], x_dem[r]
+      Vars: q_man[r], d_mod[r], sigma[r], beta[r]
+      Params: c_ship[e,r], Xcap[e,r]
+      Constraints:
+        man_split[r]: x_man[r] = sum_i x_mod[r,i]
+        global_balance: sum_r x_dem[r] - sum_r x_man[r] = 0    (IMPORTANT sign convention)
+        demand_link[r]: x_dem[r] <= sum_e x_mod[e,r]
+        man_cap[r]: x_man[r] <= q_man[r]
+        dem_cap[r]: x_dem[r] <= d_mod[r]
+        arc_cap[e,r]: x_mod[e,r] <= Xcap[e,r]
     """
-    KKT embedding for LLP with:
-        x_dem[r] + u_dem[r] = d_offer[r]
-        penalty on u_dem
 
-    eps:   smoothing for "normal" complementarity pairs
-    eps_u: tighter smoothing for u_dem ⟂ nu_udem (critical when c_pen_llp is huge)
-    u_tol: buffer for unmet-demand penalty (shifts the kink at 0)
-    eps_pen: smoothing for the unmet-demand penalty kink
-    """
-    R, RR = sets.R, sets.RR
+    # Always use model sets to avoid mismatches
+    R, A = m.R, m.A
 
     # -------------------------
-    # Duals for equalities (free)
+    # Dual variables (BOUNDED!)
     # -------------------------
-    m.lam = pyo.Var(m.R)   # dual of module balance (price signal)
-    m.pi  = pyo.Var(m.R)   # dual of production balance
-    m.alp = pyo.Var(m.R)   # dual of demand link: x_dem + u_dem = d_offer
+
+    # Equality duals (FREE)
+    m.pi = pyo.Var(R, bounds=(-M_free, M_free))          # for man_split[r]
+    # FIX #1: global_balance is an equality => lam must be free (unrestricted sign)
+    m.lam = pyo.Var(bounds=(-M_free, M_free))            # for global_balance (scalar)
+
+    # Inequality duals (>=0 with upper bounds)
+    m.mu = pyo.Var(R, within=pyo.NonNegativeReals, bounds=(0.0, M_dual))        # demand_link
+    m.alpha = pyo.Var(R, within=pyo.NonNegativeReals, bounds=(0.0, M_dual))     # man_cap
+    m.phi = pyo.Var(R, within=pyo.NonNegativeReals, bounds=(0.0, M_dual))       # dem_cap
+    m.gamma = pyo.Var(A, within=pyo.NonNegativeReals, bounds=(0.0, M_dual))     # arc_cap
+
+    # Nonnegativity duals for primal vars (>=0 with upper bounds)
+    m.nu_xman = pyo.Var(R, within=pyo.NonNegativeReals, bounds=(0.0, M_dual))
+    m.nu_xdem = pyo.Var(R, within=pyo.NonNegativeReals, bounds=(0.0, M_dual))
+    m.nu_xmod = pyo.Var(A, within=pyo.NonNegativeReals, bounds=(0.0, M_dual))
 
     # -------------------------
-    # Duals for inequalities (<=): mu >= 0
+    # Stationarity (Lagrangian gradients)
     # -------------------------
-    m.mu_man = pyo.Var(m.R, within=pyo.NonNegativeReals)  # x_man <= q_man
+    # Global balance is: sum(x_dem) - sum(x_man) = 0
+    # => lam enters as -lam for x_man and +lam for x_dem
 
-    # -------------------------
-    # Duals for nonnegativity: nu >= 0
-    # -------------------------
-    m.nu_xman  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # x_man >= 0
-    m.nu_xdom  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # x_dom >= 0
-    m.nu_xdem  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # x_dem >= 0
-    m.nu_udem  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # u_dem >= 0
-    m.nu_xflow = pyo.Var(m.RR, within=pyo.NonNegativeReals)  # x_flow >= 0
-
-    # -------------------------
-    # Stationarity (from LLP Lagrangian)
-    # -------------------------
-    # d/dx_man[r]: c_mod_man[r] + pi[r] + mu_man[r] - nu_xman[r] = 0
+    # d/dx_man[r]:  sigma[r] + pi[r] - lam + alpha[r] - nu_xman[r] = 0
     m.stat_xman = pyo.Constraint(
-        m.R,
-        rule=lambda mm, r: mm.c_mod_man[r] + mm.pi[r] + mm.mu_man[r] - mm.nu_xman[r] == 0
+        R,
+        rule=lambda mm, r: mm.sigma[r] + mm.pi[r] - mm.lam + mm.alpha[r] - mm.nu_xman[r] == 0,
     )
 
-    # d/dx_dom[r]: c_mod_dom_use[r] + lam[r] - pi[r] - nu_xdom[r] = 0
-    m.stat_xdom = pyo.Constraint(
-        m.R,
-        rule=lambda mm, r: mm.c_mod_dom_use[r] + mm.lam[r] - mm.pi[r] - mm.nu_xdom[r] == 0
-    )
-
-    # d/dx_dem[r]: -lam[r] + alp[r] - nu_xdem[r] = 0
+    # d/dx_dem[r]: -beta[r] + lam + mu[r] + phi[r] - nu_xdem[r] = 0
     m.stat_xdem = pyo.Constraint(
-        m.R,
-        rule=lambda mm, r: -mm.lam[r] + mm.alp[r] - mm.nu_xdem[r] == 0
+        R,
+        rule=lambda mm, r: -mm.beta[r] + mm.lam + mm.mu[r] + mm.phi[r] - mm.nu_xdem[r] == 0,
     )
 
-    # d/du_dem[r]: c_pen_llp[r] + alp[r] - nu_udem[r] = 0
-
-    m.stat_udem = pyo.Constraint(
-        m.R,
-        rule=lambda mm, r: (
-            mm.c_pen_llp[r] * d_smooth_pos(mm.u_dem[r] - u_tol, eps_pen)
-            + mm.alp[r]
-            - mm.nu_udem[r]
-            == 0
-        )
-    )
-
-
-    # d/dx_flow[e,r]: c_ship[e,r]*(1+tau[e,r]) + lam[r] - pi[e] - nu_xflow[e,r] = 0
-    m.stat_xflow = pyo.Constraint(
-        m.RR,
-        rule=lambda mm, e, r: mm.c_ship[e, r] * (1 + mm.tau[e, r]) + mm.lam[r] - mm.pi[e] - mm.nu_xflow[e, r] == 0
+    # FIX #2: x_mod inherits sigma[e] because x_man[e] = sum_r x_mod[e,r]
+    # LLP objective has +sigma[e]*x_man[e], so ∂/∂x_mod[e,r] includes +sigma[e].
+    #
+    # d/dx_mod[e,r]:
+    #   sigma[e] + c_ship[e,r] - pi[e] - mu[r] + gamma[e,r] - nu_xmod[e,r] = 0
+    m.stat_xmod = pyo.Constraint(
+        A,
+        rule=lambda mm, e, r: mm.sigma[e]
+        + mm.c_ship[e, r]
+        - mm.pi[e]
+        - mm.mu[r]
+        + mm.gamma[e, r]
+        - mm.nu_xmod[e, r]
+        == 0,
     )
 
     # -------------------------
-    # Complementarity (smoothed FB)
+    # Complementarity (hard products)
     # -------------------------
     for r in R:
-        # inequality: x_man <= q_man
-        add_fb_comp(m, m.mu_man[r], (m.q_man[r] - m.x_man[r]), eps, f"comp_man_cap_{r}")
+        # x_man <= q_man   slack = q_man - x_man >= 0
+        _add_comp_product(m, m.alpha[r], (m.q_man[r] - m.x_man[r]), f"comp_man_cap_{r}")
 
-        # nonnegativity
-        add_fb_comp(m, m.nu_xman[r], m.x_man[r], eps, f"comp_xman_{r}")
-        add_fb_comp(m, m.nu_xdom[r], m.x_dom[r], eps, f"comp_xdom_{r}")
-        add_fb_comp(m, m.nu_xdem[r], m.x_dem[r], eps, f"comp_xdem_{r}")
+        # x_dem <= d_mod   slack = d_mod - x_dem >= 0
+        _add_comp_product(m, m.phi[r], (m.d_mod[r] - m.x_dem[r]), f"comp_dem_cap_{r}")
 
-        # IMPORTANT: u_dem complementarity needs a much smaller eps to avoid "numerical VOLL"
-        add_fb_comp(m, m.nu_udem[r], m.u_dem[r], eps_u, f"comp_udem_{r}")
+        # x_dem <= sum_e x_mod[e,r]   slack = sum_e x_mod[e,r] - x_dem >= 0
+        _add_comp_product(
+            m,
+            m.mu[r],
+            (sum(m.x_mod[e, r] for e in R) - m.x_dem[r]),
+            f"comp_demand_link_{r}",
+        )
 
-    for (e, r) in RR:
-        add_fb_comp(m, m.nu_xflow[e, r], m.x_flow[e, r], eps, f"comp_xflow_{e}_{r}")
+        # nonnegativity: x_man >= 0, x_dem >= 0
+        _add_comp_product(m, m.nu_xman[r], m.x_man[r], f"comp_xman_{r}")
+        _add_comp_product(m, m.nu_xdem[r], m.x_dem[r], f"comp_xdem_{r}")
+
+    for (e, r) in A:
+        # arc cap: x_mod <= Xcap   slack = Xcap - x_mod >= 0
+        _add_comp_product(m, m.gamma[e, r], (m.Xcap[e, r] - m.x_mod[e, r]), f"comp_arc_cap_{e}_{r}")
+
+        # nonnegativity: x_mod >= 0
+        _add_comp_product(m, m.nu_xmod[e, r], m.x_mod[e, r], f"comp_xmod_{e}_{r}")

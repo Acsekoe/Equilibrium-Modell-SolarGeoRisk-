@@ -1,77 +1,93 @@
 from __future__ import annotations
+
 import pyomo.environ as pyo
+
 from epec.core.sets import Sets
 from epec.core.params import Params
 from epec.core.theta import Theta
 
 
-def build_llp_primal(sets: Sets, params: Params, theta: Theta, u_tol: float, eps_pen: float) -> pyo.ConcreteModel:
+def build_llp_primal(sets: Sets, params: Params, theta: Theta) -> pyo.ConcreteModel:
+    """Lower-level market clearing problem (LLP) — LaTeX formulation.
+
+    Variables (primal):
+      x_mod[e,r] >= 0  (flows, incl. domestic)
+      x_man[r] >= 0
+      x_dem[r] >= 0
+
+    Strategic vars ENTER the LLP as variables (fixed/bounded in the ULP/MPEC wrapper):
+      q_man[r] in [0,Qcap[r]]
+      d_mod[r] in [0,Dcap[r]]
+      sigma[r] >= 0
+      beta[r] >= 0
+
+    LLP objective (cost min / welfare max form as in your LaTeX):
+      min  Σ_r sigma[r]*x_man[r] + Σ_{e,r} c_ship[e,r]*x_mod[e,r] - Σ_r beta[r]*x_dem[r]
+
+    Constraints:
+      x_man[r] = Σ_i x_mod[r,i]
+      Σ_r x_dem[r] = Σ_r x_man[r]           (implemented as Σ x_dem - Σ x_man = 0 so λ is a positive price)
+      x_dem[r] <= Σ_e x_mod[e,r]
+      x_man[r] <= q_man[r]
+      x_dem[r] <= d_mod[r]
+      x_mod[e,r] <= Xcap[e,r]
     """
-    LLP (follower) primal:
 
-      x_dem[r] = served demand  (>=0)
-      u_dem[r] = unmet demand   (>=0)
-      x_dem[r] + u_dem[r] = d_offer[r]   (equality)
-
-    Penalty is applied to u_dem, not to (d_offer - x_dem).
-
-    Note: q_man, d_offer, tau are carried into LLP as Vars and will be fixed/bounded
-    in the player-level MPEC builder.
-    """
-    R, RR = sets.R, sets.RR
+    R, A = sets.R, sets.A
     m = pyo.ConcreteModel("LLP_Primal")
 
-    m.R  = pyo.Set(initialize=R)
-    m.RR = pyo.Set(dimen=2, initialize=RR)
+    m.R = pyo.Set(initialize=R)
+    m.A = pyo.Set(dimen=2, initialize=A)
 
-    # --- strategic vars enter LLP as VARIABLES (fixed/bounded in ULP wrapper)
-    m.q_man   = pyo.Var(m.R,  within=pyo.NonNegativeReals, initialize=theta.q_man)
-    m.d_offer = pyo.Var(m.R,  within=pyo.NonNegativeReals, initialize=theta.d_offer)
-    m.tau     = pyo.Var(m.RR, within=pyo.NonNegativeReals, initialize=theta.tau)
+    # --- strategic vars (fixed/bounded in ULP wrapper)
+    m.q_man = pyo.Var(m.R, within=pyo.NonNegativeReals, initialize=theta.q_man)
+    m.d_mod = pyo.Var(m.R, within=pyo.NonNegativeReals, initialize=theta.d_mod)
+    m.sigma = pyo.Var(m.R, within=pyo.NonNegativeReals, initialize=theta.sigma)
+    m.beta = pyo.Var(m.R, within=pyo.NonNegativeReals, initialize=theta.beta)
 
-    # LLP cost params
-    m.c_mod_man     = pyo.Param(m.R,  initialize=params.c_mod_man)
-    m.c_mod_dom_use = pyo.Param(m.R,  initialize=params.c_mod_dom_use)
-    m.c_ship        = pyo.Param(m.RR, initialize=params.c_ship)
-    m.c_pen_llp     = pyo.Param(m.R,  initialize=params.c_pen_llp)
+    # default bounds (still overridden/fixed in ULP wrapper)
+    for r in R:
+        m.q_man[r].setub(float(params.Qcap[r]))
+        m.d_mod[r].setub(float(params.Dcap[r]))
+        m.sigma[r].setub(float(params.sigma_ub[r]))
+        m.beta[r].setub(float(params.beta_ub[r]))
 
-    # LLP primal vars
-    m.x_man  = pyo.Var(m.R,  within=pyo.NonNegativeReals)
-    m.x_dom  = pyo.Var(m.R,  within=pyo.NonNegativeReals)
-    m.x_flow = pyo.Var(m.RR, within=pyo.NonNegativeReals)
-    m.x_dem  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # served demand
-    m.u_dem  = pyo.Var(m.R,  within=pyo.NonNegativeReals)  # unmet demand
+    # --- parameters
+    m.c_ship = pyo.Param(m.A, initialize=params.c_ship)
+    m.Xcap = pyo.Param(m.A, initialize=params.Xcap)
 
-    # LLP objective (system cost)
-    def llp_obj(mm):
-        man  = sum(mm.c_mod_man[r] * mm.x_man[r] for r in mm.R)
-        dom  = sum(mm.c_mod_dom_use[r] * mm.x_dom[r] for r in mm.R)
-        ship = sum(mm.c_ship[e, r] * (1 + mm.tau[e, r]) * mm.x_flow[e, r]
-                   for (e, r) in mm.RR)
-        def smooth_pos(x, eps):
-            # smooth approximation of max(x, 0)
-            return 0.5 * (x + pyo.sqrt(x*x + eps*eps))
+    # --- LLP primal vars
+    m.x_mod = pyo.Var(m.A, within=pyo.NonNegativeReals)
+    m.x_man = pyo.Var(m.R, within=pyo.NonNegativeReals)
+    m.x_dem = pyo.Var(m.R, within=pyo.NonNegativeReals)
 
-        pen = sum(mm.c_pen_llp[r] * smooth_pos(mm.u_dem[r] - u_tol, eps_pen) for r in mm.R)
-
-        return man + dom + ship + pen
+    # LLP objective
+    def llp_obj(mm: pyo.ConcreteModel):
+        man = sum(mm.sigma[r] * mm.x_man[r] for r in mm.R)
+        ship = sum(mm.c_ship[e, r] * mm.x_mod[e, r] for (e, r) in mm.A)
+        util = sum(mm.beta[r] * mm.x_dem[r] for r in mm.R)
+        return man + ship - util
 
     m.LLP_OBJ = pyo.Objective(rule=llp_obj, sense=pyo.minimize)
 
-    # (1) Module balance: domestic + imports = served demand
-    def mod_balance(mm, r):
-        return mm.x_dom[r] + sum(mm.x_flow[e, r] for e in mm.R if e != r) == mm.x_dem[r]
-    m.mod_balance = pyo.Constraint(m.R, rule=mod_balance)
+    # (1) manufacturing split
+    def man_split(mm, r):
+        return mm.x_man[r] == sum(mm.x_mod[r, i] for i in mm.R)
 
-    # (2) Production balance: manufacturing = domestic use + exports
-    def prod_balance(mm, r):
-        return mm.x_man[r] == mm.x_dom[r] + sum(mm.x_flow[r, i] for i in mm.R if i != r)
-    m.prod_balance = pyo.Constraint(m.R, rule=prod_balance)
+    m.man_split = pyo.Constraint(m.R, rule=man_split)
 
-    # (3) Manufacturing capacity: x_man <= q_man
+    # (2) global balance (λ is a positive price with this sign convention)
+    m.global_balance = pyo.Constraint(expr=sum(m.x_dem[r] for r in m.R) - sum(m.x_man[r] for r in m.R) == 0)
+
+    # (3) demand link
+    def demand_link(mm, r):
+        return mm.x_dem[r] <= sum(mm.x_mod[e, r] for e in mm.R)
+
+    m.demand_link = pyo.Constraint(m.R, rule=demand_link)
+
+    # (4) bounds driven by strategic offers
     m.man_cap = pyo.Constraint(m.R, rule=lambda mm, r: mm.x_man[r] <= mm.q_man[r])
-
-    # (4) Demand link: served + unmet = offered
-    m.dem_link = pyo.Constraint(m.R, rule=lambda mm, r: mm.x_dem[r] + mm.u_dem[r] == mm.d_offer[r])
+    m.dem_cap = pyo.Constraint(m.R, rule=lambda mm, r: mm.x_dem[r] <= mm.d_mod[r])
+    m.arc_cap = pyo.Constraint(m.A, rule=lambda mm, e, r: mm.x_mod[e, r] <= mm.Xcap[e, r])
 
     return m

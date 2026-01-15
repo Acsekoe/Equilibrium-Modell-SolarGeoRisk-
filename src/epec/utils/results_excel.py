@@ -1,31 +1,60 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+"""Excel logger for the LaTeX SolarGeoRisk EPEC runs.
+
+Design goals
+- Robust: never crashes on missing keys in `hist` rows.
+- Transparent: 1 row = (iteration, player) snapshot.
+- Useful: logs strategic vars, primal flows, lambda, and convergence metrics if provided.
+
+Typical `hist` row (recommended)
+{
+  'iter': int,
+  'region': str,
+  'accepted': bool,
+  'status': str,
+  'term': str,
+  'msg': str,
+  'ulp_obj': float,
+  'lambda': float,
+  # optional iteration metrics (repeat on each row or only on summary rows)
+  'abs_max_change': float,
+  'rel_inf': float,
+
+  # strategic vars (either as dicts for all regions or scalars for just the player)
+  'q_man': {r: val}, 'd_mod': {r: val}, 'sigma': {r: val}, 'beta': {r: val},
+
+  # primal vars
+  'x_man': {r: val}, 'x_dem': {r: val},
+  'x_mod': {(e,r): val},
+}
+
+If your `hist` stores only the player's values (scalars), the writer will still log
+those into the '*_player' columns.
+"""
+
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 try:
     from openpyxl import Workbook
-    from openpyxl.styles import Font, Alignment
+    from openpyxl.styles import Alignment, Font
     from openpyxl.utils import get_column_letter
-except ModuleNotFoundError:  # optional dependency
-    Workbook = None
-    Font = None
-    Alignment = None
-    get_column_letter = None
+except ModuleNotFoundError as e:  # pragma: no cover
+    raise ModuleNotFoundError(
+        "openpyxl is required to write Excel results. Install with: pip install openpyxl"
+    ) from e
 
 
-def _safe_float(x: Any) -> Any:
-    """Convert numeric-ish objects to float when possible (Pyomo values, numpy scalars, etc.)."""
+def _safe_value(x: Any) -> Any:
+    """Convert Pyomo/numpy scalars to plain python values when possible."""
     try:
-        # pyomo value-like
         if hasattr(x, "value"):
             x = x.value
-        # numpy scalar-like
         if hasattr(x, "item") and callable(x.item):
             x = x.item()
-        # plain numeric
         if isinstance(x, (int, float)):
             return float(x)
         return x
@@ -40,185 +69,205 @@ def _auto_fit_columns(ws, max_width: int = 60) -> None:
         ws.column_dimensions[get_column_letter(col_idx)].width = max(10, width)
 
 
-def _write_kv_sheet(ws, title: str, data: Dict[str, Any]) -> None:
-    ws.title = title
-    ws.append(["key", "value"])
-    ws["A1"].font = Font(bold=True)
-    ws["B1"].font = Font(bold=True)
-    for k in sorted(data.keys()):
-        ws.append([k, _safe_float(data[k])])
-    ws.freeze_panes = "A2"
-    _auto_fit_columns(ws)
-
-
-def _theta_to_dict(theta: Any) -> Dict[str, Any]:
-    """
-    Best-effort conversion. Works if theta has .q_man/.d_offer/.tau dict-like.
-    """
-    out: Dict[str, Any] = {}
-    for name in ("q_man", "d_offer", "tau"):
-        if hasattr(theta, name):
-            out[name] = getattr(theta, name)
-    return out
-
-
-def _flatten_region_dict(prefix: str, regions: Iterable[str], d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _flatten_region(prefix: str, regions: Iterable[str], d: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     d = d or {}
-    return {f"{prefix}_{r}": _safe_float(d.get(r, None)) for r in regions}
+    return {f"{prefix}_{r}": _safe_value(d.get(r)) for r in regions}
 
 
-def _flatten_arc_dict(prefix: str, arcs: Iterable[Tuple[str, str]], d: Optional[Dict[Tuple[str, str], Any]]) -> Dict[str, Any]:
+def _flatten_arcs(prefix: str, arcs: Iterable[Tuple[str, str]], d: Optional[Mapping[Tuple[str, str], Any]]) -> Dict[str, Any]:
     d = d or {}
     out: Dict[str, Any] = {}
     for (e, r) in arcs:
-        out[f"{prefix}_{e}_{r}"] = _safe_float(d.get((e, r), None))
+        out[f"{prefix}_{e}_{r}"] = _safe_value(d.get((e, r)))
+    return out
+
+
+def _theta_dict(theta: Any) -> Dict[str, Any]:
+    """Best-effort extraction for final theta sheet."""
+    if theta is None:
+        return {}
+    if is_dataclass(theta):
+        return asdict(theta)
+    out: Dict[str, Any] = {}
+    for k in ("q_man", "d_mod", "sigma", "beta"):
+        if hasattr(theta, k):
+            out[k] = getattr(theta, k)
     return out
 
 
 def save_run_results_excel(
-    project_root: Path,
     *,
+    project_root: Path,
     sets: Any,
     params: Any,
     theta_star: Any,
     hist: List[Dict[str, Any]],
-    run_cfg: Dict[str, Any],
-    ipopt_opts: Optional[Dict[str, Any]] = None,
-    filename_prefix: str = "run_small",
+    run_cfg: Optional[Dict[str, Any]] = None,
+    solver_opts: Optional[Dict[str, Any]] = None,
+    filename_prefix: str = "run_latex",
+    results_subdir: str = "results",
 ) -> Path:
-    """
-    Writes an Excel file to <project_root>/results/<prefix>_<timestamp>_....xlsx
+    """Write an Excel file with run history.
 
-    What it logs into 'history':
-      - iter, region, accepted, status, term, ulp_obj, llp_obj
-      - lambda_*  (from row["lambda"] dict)
-      - alp_*     (from row["alp"] dict)          <-- you must add these to hist
-      - u_dem_*   (from row["u_dem"] dict)        <-- you must add these to hist
-      - nu_udem_* (from row["nu_udem"] dict)      <-- you must add these to hist
-      - x_dem_*, x_dom_*, x_man_* (if present)
-      - x_flow_e_r (if present as row["x_flow"] dict)
-      - br_tau_in_e_r (from row["br_tau_in"] dict if you log it)
-
-    If keys are missing in hist rows, corresponding columns will be empty.
+    - Output path: <project_root>/<results_subdir>/<prefix>_<timestamp>.xlsx
+    - Sheet 'history_wide': one row per hist entry (iter, region)
+    - Sheet 'theta_final': final strategic variables
+    - Sheet 'run_config': run_cfg + solver options + selected params summary
     """
-    if Workbook is None:
-        raise ModuleNotFoundError(
-            "openpyxl is required to write Excel results. Install it with: pip install openpyxl"
-        )
 
     project_root = Path(project_root)
-    results_dir = project_root / "results"
+    results_dir = project_root / results_subdir
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # nice filename with key params
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    eps = run_cfg.get("eps", None)
-    eps_u = run_cfg.get("eps_u", None)
-    tol = run_cfg.get("tol", None)
-    max_iter = run_cfg.get("max_iter", None)
-    damping = run_cfg.get("damping", None)
-    price_sign = run_cfg.get("price_sign", None)
-
-    def _fmt(v: Any) -> str:
-        if v is None:
-            return "NA"
-        try:
-            return f"{float(v):.0e}"
-        except Exception:
-            return str(v)
-
-    fname = (
-        f"{filename_prefix}_{ts}"
-        f"_eps={_fmt(eps)}_eps_u={_fmt(eps_u)}_tol={_fmt(tol)}"
-        f"_max_iter={_fmt(max_iter)}_damping={_fmt(damping)}_price_sign={_fmt(price_sign)}.xlsx"
-    )
-    out_path = results_dir / fname
+    out_path = results_dir / f"{filename_prefix}_{ts}.xlsx"
 
     R = list(getattr(sets, "R"))
-    RR = list(getattr(sets, "RR"))
+    # Use A if present; else fall back to RR; else empty
+    A = list(getattr(sets, "A", getattr(sets, "RR", [])))
 
     wb = Workbook()
 
-    # --- run_config sheet
+    # ----------------
+    # run_config sheet
+    # ----------------
     ws_cfg = wb.active
-    cfg_data = {
-        **{f"run_cfg.{k}": v for k, v in (run_cfg or {}).items()},
-        **{f"ipopt.{k}": v for k, v in (ipopt_opts or {}).items()},
-    }
-    _write_kv_sheet(ws_cfg, "run_config", cfg_data)
+    ws_cfg.title = "run_config"
+    ws_cfg.append(["key", "value"])
+    ws_cfg["A1"].font = Font(bold=True)
+    ws_cfg["B1"].font = Font(bold=True)
 
-    # --- final_theta sheet
-    ws_theta = wb.create_sheet("final_theta")
-    ws_theta.append(["category", "key", "value"])
+    def _append_kv(prefix: str, d: Optional[Dict[str, Any]]):
+        if not d:
+            return
+        for k in sorted(d.keys()):
+            ws_cfg.append([f"{prefix}{k}", _safe_value(d[k])])
+
+    _append_kv("run.", run_cfg or {})
+    _append_kv("solver.", solver_opts or {})
+
+    # minimal param summary (avoid huge matrices)
+    # log caps + core costs if available
+    for name in ("Qcap", "Dcap", "c_man", "beta_bar"):
+        if hasattr(params, name):
+            d = getattr(params, name)
+            if isinstance(d, dict):
+                for r in R:
+                    ws_cfg.append([f"param.{name}.{r}", _safe_value(d.get(r))])
+
+    ws_cfg.freeze_panes = "A2"
+    _auto_fit_columns(ws_cfg)
+
+    # ----------------
+    # theta_final sheet
+    # ----------------
+    ws_t = wb.create_sheet("theta_final")
+    ws_t.append(["var", "key", "value"])
     for c in ("A1", "B1", "C1"):
-        ws_theta[c].font = Font(bold=True)
+        ws_t[c].font = Font(bold=True)
 
-    theta_dict = _theta_to_dict(theta_star)
-    # q_man, d_offer
-    for k in ("q_man", "d_offer"):
-        dd = theta_dict.get(k, {}) or {}
-        for r in R:
-            ws_theta.append([k, r, _safe_float(dd.get(r, None))])
-    # tau arcs
-    tau = theta_dict.get("tau", {}) or {}
-    for (e, r) in RR:
-        ws_theta.append(["tau", f"{e}->{r}", _safe_float(tau.get((e, r), None))])
+    th = _theta_dict(theta_star)
+    for var in ("q_man", "d_mod", "sigma", "beta"):
+        d = th.get(var, {}) if isinstance(th, dict) else {}
+        if isinstance(d, dict):
+            for r in R:
+                ws_t.append([var, r, _safe_value(d.get(r))])
 
-    ws_theta.freeze_panes = "A2"
-    _auto_fit_columns(ws_theta)
+    ws_t.freeze_panes = "A2"
+    _auto_fit_columns(ws_t)
 
-    # --- history sheet
-    ws_h = wb.create_sheet("history")
+    # ----------------
+    # history_wide sheet
+    # ----------------
+    ws = wb.create_sheet("history_wide")
 
-    # build columns
-    base_cols = ["iter", "region", "accepted", "status", "term", "ulp_obj", "llp_obj"]
+    # Build columns
+    base_cols = [
+        "iter",
+        "region",
+        "accepted",
+        "status",
+        "term",
+        "msg",
+        "ulp_obj",
+        "lambda",
+        "abs_max_change",
+        "rel_inf",
+    ]
 
-    region_cols = []
-    for pfx in ["lambda", "alp", "u_dem", "nu_udem", "x_dem", "x_dom", "x_man"]:
-        region_cols.extend([f"{pfx}_{r}" for r in R])
+    # Wide: strategic variables (all regions)
+    strat_cols: List[str] = []
+    for pfx in ("q_man", "d_mod", "sigma", "beta"):
+        strat_cols.extend([f"{pfx}_{r}" for r in R])
+        strat_cols.append(f"{pfx}_player")
 
-    arc_cols = []
-    for pfx in ["x_flow", "br_tau_in"]:
-        arc_cols.extend([f"{pfx}_{e}_{r}" for (e, r) in RR])
+    # Wide: primal vars
+    primal_cols: List[str] = []
+    for pfx in ("x_man", "x_dem"):
+        primal_cols.extend([f"{pfx}_{r}" for r in R])
 
-    extra_cols = ["max_u_dem"]  # if you log row["max_u_dem"]
-    cols = base_cols + region_cols + extra_cols + arc_cols
+    arc_cols: List[str] = [f"x_mod_{e}_{r}" for (e, r) in A]
 
-    ws_h.append(cols)
+    cols = base_cols + strat_cols + primal_cols + arc_cols
+
+    ws.append(cols)
     for j in range(1, len(cols) + 1):
-        cell = ws_h.cell(row=1, column=j)
+        cell = ws.cell(row=1, column=j)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
 
-    ws_h.freeze_panes = "A2"
-    ws_h.auto_filter.ref = f"A1:{get_column_letter(len(cols))}1"
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}1"
 
-    # fill rows
+    # Fill rows
     for row in hist:
         flat: Dict[str, Any] = {}
-        flat["iter"] = row.get("iter")
-        flat["region"] = row.get("region")
-        flat["accepted"] = row.get("accepted")
-        flat["status"] = row.get("status")
-        flat["term"] = row.get("term")
-        flat["ulp_obj"] = _safe_float(row.get("ulp_obj"))
-        flat["llp_obj"] = _safe_float(row.get("llp_obj"))
-        flat["max_u_dem"] = _safe_float(row.get("max_u_dem"))
 
-        flat.update(_flatten_region_dict("lambda", R, row.get("lambda")))
-        flat.update(_flatten_region_dict("alp", R, row.get("alp")))
-        flat.update(_flatten_region_dict("u_dem", R, row.get("u_dem")))
-        flat.update(_flatten_region_dict("nu_udem", R, row.get("nu_udem")))
-        flat.update(_flatten_region_dict("x_dem", R, row.get("x_dem")))
-        flat.update(_flatten_region_dict("x_dom", R, row.get("x_dom")))
-        flat.update(_flatten_region_dict("x_man", R, row.get("x_man")))
+        # base
+        for k in base_cols:
+            flat[k] = _safe_value(row.get(k))
 
-        flat.update(_flatten_arc_dict("x_flow", RR, row.get("x_flow")))
-        flat.update(_flatten_arc_dict("br_tau_in", RR, row.get("br_tau_in")))
+        # allow alternative names
+        if flat.get("lambda") is None:
+            flat["lambda"] = _safe_value(row.get("lam"))
 
-        ws_h.append([flat.get(c, None) for c in cols])
+        # strategic dicts (all regions)
+        for pfx in ("q_man", "d_mod", "sigma", "beta"):
+            d = row.get(pfx)
+            if isinstance(d, dict):
+                flat.update(_flatten_region(pfx, R, d))
+            else:
+                # no dict: leave region columns blank
+                flat.update({f"{pfx}_{r}": None for r in R})
 
-    _auto_fit_columns(ws_h)
+            # player scalar (preferred key br_*, fallback to var in model)
+            player_key = f"br_{pfx}" if f"br_{pfx}" in row else None
+            if player_key:
+                flat[f"{pfx}_player"] = _safe_value(row.get(player_key))
+            else:
+                # if it is a scalar already
+                flat[f"{pfx}_player"] = _safe_value(d) if not isinstance(d, dict) else None
+
+        # primal dicts
+        for pfx in ("x_man", "x_dem"):
+            d = row.get(pfx)
+            if isinstance(d, dict):
+                flat.update(_flatten_region(pfx, R, d))
+            else:
+                flat.update({f"{pfx}_{r}": None for r in R})
+
+        # arc flows
+        xmod = row.get("x_mod")
+        if isinstance(xmod, dict):
+            flat.update(_flatten_arcs("x_mod", A, xmod))
+        else:
+            # empty arc flow columns
+            for (e, r) in A:
+                flat[f"x_mod_{e}_{r}"] = None
+
+        ws.append([flat.get(c) for c in cols])
+
+    _auto_fit_columns(ws)
 
     wb.save(out_path)
     return out_path
