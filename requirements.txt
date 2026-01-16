@@ -1,4 +1,8 @@
-pyomo
-sphinx
-myst-parser
-sphinx-autodoc-typehints
+gamspy
+numpy
+pandas
+openpyxl
+matplotlib
+scipy
+pyarrow
+rich

@@ -1,0 +1,32 @@
+# SolarGeoRisk EPEC (GAMSPy/GAMS) — quick run commands
+# Run these from repo_root/
+
+# 1) LLP primal (LP)
+python gamspy/executables/run_llp_lp.py
+
+# Optional: specify an LP solver (depends on your GAMS setup)
+# python gamspy/executables/run_llp_lp.py --solver highs
+# python gamspy/executables/run_llp_lp.py --solver cplex
+# python gamspy/executables/run_llp_lp.py --solver gurobi
+
+# 2) LLP KKT (MCP via PATH) + LP-vs-MCP check
+python gamspy/executables/run_llp_mcp.py --mcp-solver path
+
+# Optional: also specify an LP solver for the warm start
+# python gamspy/executables/run_llp_mcp.py --lp-solver highs --mcp-solver path
+
+# 3) Gauss–Seidel (player best-responses)
+# Preferred: solve each best-response as an MPEC (NLPEC), with PATH as the MCP engine inside
+python gamspy/executables/run_gs.py --method mpec --solver-mpec nlpec --solver-mcp path --max-iter 1 --tol 1e-2
+
+# Fallback: PATH-only workflow (derivative-free grid search over player strategies)
+python gamspy/executables/run_gs.py --method grid --solver-mcp path --max-iter 1 --tol 1e-6
+
+
+python gamspy/executables/run_gs.py --max-iter 1 --method mpec --solver-mpec nlpec --solver-mcp path
+
+
+# Useful knobs
+# --damping 0.5    (stabilize GS if it oscillates)
+# --max-iter 50
+# --tol 1e-7

@@ -1,3 +1,6 @@
 {
-  "python.analysis.extraPaths": ["./src"]
+  "python.analysis.extraPaths": ["./src"],
+  "python.venvPath": "${env:USERPROFILE}\\.venvs",
+  "python.defaultInterpreterPath": "C:\\\\Users\\\\Alexander\\\\.venvs\\\\gamspy-epec\\\\Scripts\\\\python.exe",
+  "python.terminal.activateEnvironment": true
 }
