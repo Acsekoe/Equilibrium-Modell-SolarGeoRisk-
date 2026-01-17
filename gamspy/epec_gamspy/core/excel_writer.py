@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import openpyxl
@@ -17,12 +18,61 @@ SHEET_FINAL = "final_theta"
 SHEET_HIST = "history"
 
 
+_WINDOWS_ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_filename_component(s: str) -> str:
+    s = str(s).strip()
+    s = _WINDOWS_ILLEGAL_CHARS_RE.sub("_", s)
+    s = s.rstrip(". ")
+    return s or "_"
+
+
+def _format_num_for_filename(x: Any) -> str:
+    s = str(x)
+    return s.replace(".", "p")
+
+
+def build_results_path(
+    base_dir: str | Path,
+    prefix: str,
+    run_config: dict,
+    ext: str = ".xlsx",
+) -> Path:
+    base_dir = Path(base_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    method = _sanitize_filename_component(run_config.get("method", "na"))
+    solver_mpec = _sanitize_filename_component(run_config.get("solver_mpec", "na"))
+    solver_mcp = _sanitize_filename_component(run_config.get("solver_mcp", "na"))
+    max_iter = _sanitize_filename_component(run_config.get("max_iter", "na"))
+    tol = _sanitize_filename_component(_format_num_for_filename(run_config.get("tol", "na")))
+    damping = _sanitize_filename_component(_format_num_for_filename(run_config.get("damping", "na")))
+
+    prefix = _sanitize_filename_component(prefix)
+    ext = ext if ext.startswith(".") else f".{ext}"
+
+    filename = (
+        f"{prefix}_{timestamp}"
+        f"_m-{method}"
+        f"_mpec-{solver_mpec}"
+        f"_mcp-{solver_mcp}"
+        f"_it-{max_iter}"
+        f"_tol-{tol}"
+        f"_damp-{damping}"
+        f"{ext}"
+    )
+    return base_dir / filename
+
+
 def _utc_stamp() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _ensure_wb(path: Path) -> Workbook:
-    if path.exists():
+def _ensure_wb(path: Path, append: bool) -> Workbook:
+    if append and path.exists():
         return openpyxl.load_workbook(path)
     wb = openpyxl.Workbook()
     # remove default sheet
@@ -178,7 +228,8 @@ def write_gs_results_excel(
     If workbook exists and `append=True`, rows are appended.
     """
     path = Path(path)
-    wb = _ensure_wb(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = _ensure_wb(path, append=append)
 
     ws_cfg = _get_or_create_sheet(wb, SHEET_RUNCFG)
     ws_final = _get_or_create_sheet(wb, SHEET_FINAL)

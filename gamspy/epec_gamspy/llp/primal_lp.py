@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 import gamspy as gp
 
 Z = gp.Number(0)
+H = gp.Number(0.5)
 
 from ..core.adapters import df_1d, df_2d, var_to_dict_1d, var_to_dict_2d
 from ..core.results import CaseData, Theta, LLPResult
@@ -16,16 +17,14 @@ def solve_llp_lp(
     output: Optional[object] = None,
 ) -> Tuple[LLPResult, "gp.pd.DataFrame"]:
     """
-    Solve LLP primal as an LP:
-      min Σ_r sigma[r]*x_man[r] + Σ_{e,r} c_ship[e,r]*x_mod[e,r] - Σ_r beta[r]*x_dem[r]
-      s.t.
-        x_man[r] = Σ_i x_mod[r,i]
-        Σ_r x_dem[r] - Σ_r x_man[r] = 0
-        x_dem[r] <= Σ_e x_mod[e,r]
-        x_man[r] <= q_man[r]
-        x_dem[r] <= d_mod[r]
-        x_mod[e,r] <= Xcap[e,r]
-        x_* >= 0
+    LLP primal with quadratic (reported) utility in demand.
+
+    Reported utility: U_rep_r(q) = beta[r]*q - 0.5*b_dem[r]*q^2
+    Minimization objective:
+      min Σ_r sigma[r]*x_man[r]
+        + Σ_{e,i} c_ship[e,i]*x_mod[e,i]
+        - Σ_r beta[r]*x_dem[r]
+        + 0.5*Σ_r b_dem[r]*(x_dem[r])^2
     """
     m = gp.Container()
 
@@ -37,6 +36,9 @@ def solve_llp_lp(
     beta = gp.Parameter(m, name="beta", domain=r, records=df_1d("r", theta.beta))
     q_man = gp.Parameter(m, name="q_man", domain=r, records=df_1d("r", theta.q_man))
     d_mod = gp.Parameter(m, name="d_mod", domain=r, records=df_1d("r", theta.d_mod))
+
+    # NEW: demand curvature used in quadratic term
+    b_dem = gp.Parameter(m, name="b_dem", domain=r, records=df_1d("r", data.b_dem))
 
     c_ship = gp.Parameter(m, name="c_ship", domain=[e, i], records=df_2d("e", "i", data.c_ship))
     Xcap = gp.Parameter(m, name="Xcap", domain=[e, i], records=df_2d("e", "i", data.Xcap))
@@ -59,15 +61,20 @@ def solve_llp_lp(
     dem_cap[r] = x_dem[r] <= d_mod[r]
     arc_cap[e, i] = x_mod[e, i] <= Xcap[e, i]
 
-    obj = gp.Sum(r, sigma[r] * x_man[r]) + gp.Sum([e, i], c_ship[e, i] * x_mod[e, i]) - gp.Sum(
-        r, beta[r] * x_dem[r]
+    obj = (
+        gp.Sum(r, sigma[r] * x_man[r])
+        + gp.Sum([e, i], c_ship[e, i] * x_mod[e, i])
+        - gp.Sum(r, beta[r] * x_dem[r])
+        + gp.Sum(r, H * b_dem[r] * x_dem[r] * x_dem[r])
     )
+
+    problem_type = getattr(gp.Problem, "QP", gp.Problem.NLP)
 
     model = gp.Model(
         m,
-        name="llp_lp",
+        name="llp_qp",
         equations=[man_split, global_balance, demand_link, man_cap, dem_cap, arc_cap],
-        problem=gp.Problem.LP,
+        problem=problem_type,
         sense=gp.Sense.MIN,
         objective=obj,
     )
@@ -82,4 +89,3 @@ def solve_llp_lp(
         lam=None,
     )
     return res, summary
-

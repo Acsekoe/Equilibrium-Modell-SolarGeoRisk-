@@ -1,9 +1,7 @@
+
 from __future__ import annotations
-
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Tuple, List, Optional
-import math
-
 
 @dataclass(frozen=True)
 class CaseData:
@@ -26,8 +24,12 @@ class CaseData:
     sigma_ub: Dict[str, float]
     beta_ub: Dict[str, float]
 
+    # policy/mandate: quadratic penalty on unmet demand
+    kappa_shortfall: Dict[str, float] = field(default_factory=dict)
+
     # numeric safety
     dual_bound: float = 1e6
+
 
 
 @dataclass

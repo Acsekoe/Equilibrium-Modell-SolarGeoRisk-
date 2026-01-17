@@ -17,20 +17,13 @@ def solve_llp_mcp(
     start_from_lp: Optional[LLPResult] = None,
 ) -> Tuple[LLPResult, "gp.pd.DataFrame"]:
     """
-    Solve LLP KKT as an MCP (PATH) using equation-variable matches (no bilinear products).
+    LLP KKT as MCP (PATH) for quadratic demand utility:
+      U_rep_r(q) = beta[r]*q - 0.5*b_dem[r]*q^2
 
-    KKT orientation REQUIRED by you:
+    Stationarity (MCP orientation):
       grad_xman[r] = sigma[r] + pi[r] - lam + alpha[r] >= 0  ⟂ x_man[r] >= 0
-      grad_xdem[r] = -beta[r] + lam + mu[r] + phi[r] >= 0   ⟂ x_dem[r] >= 0
-      grad_xmod[e,r] = sigma[e] + c_ship[e,r] - pi[e] - mu[r] + gamma[e,r] >= 0 ⟂ x_mod[e,r] >= 0
-
-    Slacks:
-      man_split = 0 ⟂ pi free
-      global_balance = 0 ⟂ lam free
-      demand_slack = sum_in - x_dem >=0 ⟂ mu>=0
-      man_cap_slack = q_man - x_man >=0 ⟂ alpha>=0
-      dem_cap_slack = d_mod - x_dem >=0 ⟂ phi>=0
-      arc_cap_slack = Xcap - x_mod >=0 ⟂ gamma>=0
+      grad_xdem[r] = (-beta[r] + b_dem[r]*x_dem[r]) + lam + mu[r] + phi[r] >= 0  ⟂ x_dem[r] >= 0
+      grad_xmod[e,i] = c_ship[e,i] - pi[e] - mu[i] + gamma[e,i] >= 0  ⟂ x_mod[e,i] >= 0
     """
     m = gp.Container()
 
@@ -43,6 +36,9 @@ def solve_llp_mcp(
     q_man = gp.Parameter(m, name="q_man", domain=r, records=df_1d("r", theta.q_man))
     d_mod = gp.Parameter(m, name="d_mod", domain=r, records=df_1d("r", theta.d_mod))
 
+    # NEW: demand curvature
+    b_dem = gp.Parameter(m, name="b_dem", domain=r, records=df_1d("r", data.b_dem))
+
     c_ship = gp.Parameter(m, name="c_ship", domain=[e, i], records=df_2d("e", "i", data.c_ship))
     Xcap = gp.Parameter(m, name="Xcap", domain=[e, i], records=df_2d("e", "i", data.Xcap))
 
@@ -54,22 +50,18 @@ def solve_llp_mcp(
     # duals
     pi = gp.Variable(m, name="pi", domain=r, type=gp.VariableType.FREE)
     lam = gp.Variable(m, name="lam", type=gp.VariableType.FREE)
-
     mu = gp.Variable(m, name="mu", domain=r, type=gp.VariableType.POSITIVE)
     alpha = gp.Variable(m, name="alpha", domain=r, type=gp.VariableType.POSITIVE)
     phi = gp.Variable(m, name="phi", domain=r, type=gp.VariableType.POSITIVE)
     gamma = gp.Variable(m, name="gamma", domain=[e, i], type=gp.VariableType.POSITIVE)
 
-    # numeric safety bounds for free vars
     B = float(data.dual_bound)
     pi.lo[r] = -B
     pi.up[r] = B
     lam.lo = -B
     lam.up = B
 
-    # warm start (optional)
     if start_from_lp is not None:
-        # set starting levels for primal vars
         for rr, v in start_from_lp.x_man.items():
             x_man.l[rr] = float(v)
         for rr, v in start_from_lp.x_dem.items():
@@ -77,7 +69,7 @@ def solve_llp_mcp(
         for (ee, rr), v in start_from_lp.x_mod.items():
             x_mod.l[ee, rr] = float(v)
 
-    # primal feasibility (in slack form)
+    # slacks / primal feasibility
     man_split = gp.Equation(m, name="man_split", domain=r)
     global_balance = gp.Equation(m, name="global_balance")
     demand_slack = gp.Equation(m, name="demand_slack", domain=r)
@@ -92,14 +84,17 @@ def solve_llp_mcp(
     dem_cap_slack[r] = d_mod[r] - x_dem[r] >= Z
     arc_cap_slack[e, i] = Xcap[e, i] - x_mod[e, i] >= Z
 
-    # stationarity (as you specified)
+    # stationarity
     grad_xman = gp.Equation(m, name="grad_xman", domain=r)
     grad_xdem = gp.Equation(m, name="grad_xdem", domain=r)
     grad_xmod = gp.Equation(m, name="grad_xmod", domain=[e, i])
 
     grad_xman[r] = sigma[r] + pi[r] - lam + alpha[r] >= Z
-    grad_xdem[r] = -beta[r] + lam + mu[r] + phi[r] >= Z
-    grad_xmod[e, i] = sigma[e] + c_ship[e, i] - pi[e] - mu[i] + gamma[e, i] >= Z
+
+    # NEW: + b_dem[r]*x_dem[r]
+    grad_xdem[r] = (-beta[r] + b_dem[r] * x_dem[r]) + lam + mu[r] + phi[r] >= Z
+
+    grad_xmod[e, i] = c_ship[e, i] - pi[e] - mu[i] + gamma[e, i] >= Z
 
     matches: Dict[Any, Any] = {
         man_split: pi,
@@ -132,4 +127,3 @@ def solve_llp_mcp(
         gamma=var_to_dict_2d(gamma),
     )
     return res, summary
-

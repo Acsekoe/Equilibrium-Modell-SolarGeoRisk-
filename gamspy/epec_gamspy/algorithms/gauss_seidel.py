@@ -31,7 +31,6 @@ def _pack_llp_primals(data: CaseData, llp) -> Dict[str, float]:
 
 def _pack_llp_duals(data: CaseData, llp) -> Dict[str, float]:
     out: Dict[str, float] = {}
-    # These may be None for LP-only runs; guard accordingly.
     if getattr(llp, "pi", None):
         for r in data.regions:
             out[f"pi_{r}"] = float(llp.pi.get(r, 0.0))
@@ -64,11 +63,15 @@ def _pack_llp_duals(data: CaseData, llp) -> Dict[str, float]:
 
 
 def _compute_llp_obj(data: CaseData, theta: Theta, llp) -> float:
-    # LLP objective: Σ sigma*x_man + Σ c_ship*x_mod - Σ beta*x_dem
+    # LLP objective with quadratic reported utility:
+    # Σ sigma*x_man + Σ c_ship*x_mod - Σ beta*x_dem + 0.5*Σ b_dem*(x_dem)^2
     val = 0.0
     for r in data.regions:
-        val += float(theta.sigma[r]) * float(llp.x_man.get(r, 0.0))
-        val -= float(theta.beta[r]) * float(llp.x_dem.get(r, 0.0))
+        xm = float(llp.x_man.get(r, 0.0))
+        q = float(llp.x_dem.get(r, 0.0))
+        val += float(theta.sigma[r]) * xm
+        val -= float(theta.beta[r]) * q
+        val += 0.5 * float(data.b_dem[r]) * q * q
     for (e, r), x in llp.x_mod.items():
         val += float(data.c_ship[(e, r)]) * float(x)
     return float(val)
@@ -85,14 +88,6 @@ def gauss_seidel(
     damping: float = 1.0,
     output: Optional[object] = None,
 ) -> tuple[Theta, GSHistory]:
-    """
-    Sequential (Gauss–Seidel) diagonalization.
-    Logs per (iter, player) step with:
-      - ULP vars (theta snapshot + BR values)
-      - LLP primals (x_man, x_dem, x_mod)
-      - objective values (ulp_obj, llp_obj)
-      - lambda and selected duals (if available)
-    """
     theta = theta0.copy()
     hist = GSHistory(rows=[])
 
@@ -109,7 +104,6 @@ def gauss_seidel(
         rel_max_change_sweep = 0.0
 
         for r in data.regions:
-            # Solve player best response given current theta (GS order)
             br_theta, llp, info = solve_best_response(
                 r,
                 data,
@@ -121,13 +115,11 @@ def gauss_seidel(
             )
             print(f"[it={it} r={r}] best-response method = {info.get('method')}")
 
-            # store BR (pre-damping)
             br_q = float(br_theta.q_man[r])
             br_d = float(br_theta.d_mod[r])
             br_s = float(br_theta.sigma[r])
             br_b = float(br_theta.beta[r])
 
-            # Apply damping update for player r only
             for key in ["q_man", "d_mod", "sigma", "beta"]:
                 oldv = getattr(theta, key)[r]
                 newv = getattr(br_theta, key)[r]
@@ -139,12 +131,10 @@ def gauss_seidel(
                 abs_max_change_sweep = max(abs_max_change_sweep, abs_ch)
                 rel_max_change_sweep = max(rel_max_change_sweep, rel_ch)
 
-            # compute objectives for logging
             ulp_obj = float(profit_value(r, data, theta, llp))
-            llp_obj = float(_compute_llp_obj(data, br_theta, llp))  # objective under strategy used in that solve
+            llp_obj = float(_compute_llp_obj(data, br_theta, llp))
             lam = float(llp.lam) if llp.lam is not None else None
 
-            # pack logging row
             row: Dict[str, Any] = {
                 "run_stamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "iter": it,
@@ -168,7 +158,6 @@ def gauss_seidel(
             row.update(_pack_theta_snapshot(data, theta))
             row.update(_pack_llp_primals(data, llp))
             row.update(_pack_llp_duals(data, llp))
-
             hist.rows.append(row)
 
         if abs_max_change_sweep <= tol:
