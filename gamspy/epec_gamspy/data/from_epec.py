@@ -41,6 +41,12 @@ def from_pyomo_like(params: Any, theta: Any) -> tuple[CaseData, Theta]:
     beta_ub = getattr(params, "beta_ub", {r: 1e6 for r in R})
     dual_bound = float(getattr(params, "dual_bound", 1e6))
 
+    kappa_shortfall = getattr(params, "kappa_shortfall", None)
+    if kappa_shortfall is None:
+        kappa_shortfall = {}
+    if not isinstance(kappa_shortfall, dict):
+        raise ValueError("from_pyomo_like: params.kappa_shortfall must be a dict {region: float} if provided")
+
     data = CaseData(
         regions=list(R),
         Qcap=dict(Qcap),
@@ -52,6 +58,7 @@ def from_pyomo_like(params: Any, theta: Any) -> tuple[CaseData, Theta]:
         b_dem=dict(b_dem),
         sigma_ub=dict(sigma_ub),
         beta_ub=dict(beta_ub),
+        kappa_shortfall=dict(kappa_shortfall),
         dual_bound=dual_bound,
     )
 

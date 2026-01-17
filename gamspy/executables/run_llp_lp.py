@@ -32,6 +32,11 @@ def main():
     for k, v in res.x_dem.items():
         print(k, v)
 
+    print("\n=== s_unmet (unserved demand) ===")
+    if res.s_unmet:
+        for k, v in res.s_unmet.items():
+            print(k, v)
+
     print("\n=== x_mod (nonzeros) ===")
     for (e, r), v in sorted(res.x_mod.items()):
         if abs(v) > 1e-9:

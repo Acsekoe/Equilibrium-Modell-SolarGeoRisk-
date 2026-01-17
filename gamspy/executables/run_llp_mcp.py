@@ -31,6 +31,11 @@ def main():
     print("\n=== LLP MCP lambda ===")
     print(mcp.lam)
 
+    if mcp.s_unmet is not None:
+        print("\n=== LLP MCP s_unmet ===")
+        for r, v in mcp.s_unmet.items():
+            print(r, v)
+
     print("\n=== max |LP - MCP| over (x_man, x_dem, x_mod) ===")
     print(diff)
 

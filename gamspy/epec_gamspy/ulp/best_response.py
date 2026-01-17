@@ -16,7 +16,7 @@ def solve_best_response(
     data: CaseData,
     theta_fixed: Theta,
     method: str = "mpec",              # "mpec" (preferred) or "grid"
-    solver_mpec: str = "nlpec",
+    solver_mpec: str = "KNITRO",
     solver_mcp: str = "path",
     output: Optional[object] = None,
 ) -> Tuple[Theta, LLPResult, Dict[str, Any]]:
@@ -54,8 +54,24 @@ def _best_response_mpec(
     b_dem = gp.Parameter(m, name="b_dem", domain=R, records=df_1d("r", data.b_dem))
     c_man = gp.Parameter(m, name="c_man", domain=R, records=df_1d("r", data.c_man))
 
+    # LLP unmet-demand penalty weight (defaults to 0 if not provided)
+    kappa_dict = {rr: float(getattr(data, "kappa_shortfall", {}).get(rr, 0.0)) for rr in data.regions}
+    kappa_shortfall = gp.Parameter(m, name="kappa_shortfall", domain=R, records=df_1d("r", kappa_dict))
+
     sigma_ub = gp.Parameter(m, name="sigma_ub", domain=R, records=df_1d("r", data.sigma_ub))
     beta_ub = gp.Parameter(m, name="beta_ub", domain=R, records=df_1d("r", data.beta_ub))
+
+    # --- sanity checks (domestic arcs must exist) ---
+    for rr in data.regions:
+        if (rr, rr) not in data.Xcap or float(data.Xcap[(rr, rr)]) <= 0.0:
+            raise ValueError(
+                f"Missing/zero domestic arc cap Xcap[({rr},{rr})]. "
+                "This can force demand collapse even with penalties."
+            )
+        if (rr, rr) not in data.c_ship:
+            raise ValueError(f"Missing domestic shipping cost c_ship[({rr},{rr})] (expected 0).")
+        if abs(float(data.c_ship[(rr, rr)])) > 1e-12:
+            raise ValueError(f"Nonzero domestic shipping cost c_ship[({rr},{rr})]={data.c_ship[(rr, rr)]} (expected 0).")
 
     # strategic variables (all regions exist; non-player regions fixed)
     q_man = gp.Variable(m, name="q_man", domain=R, type=gp.VariableType.POSITIVE)
@@ -68,20 +84,18 @@ def _best_response_mpec(
     sigma.up[R] = sigma_ub[R]
     beta.up[R] = beta_ub[R]
 
-    # IMPORTANT FIX: make d_mod exogenous (no strategic demand-cap gaming)
-    d_mod.fx[R] = Dcap[R]
-
-    # init at current theta (d_mod is fixed anyway; keep levels consistent)
+    # init at current theta
     for rr in data.regions:
         q_man.l[rr] = float(theta_fixed.q_man[rr])
-        d_mod.l[rr] = float(data.Dcap[rr])
+        d_mod.l[rr] = float(theta_fixed.d_mod[rr])
         sigma.l[rr] = float(theta_fixed.sigma[rr])
         beta.l[rr] = float(theta_fixed.beta[rr])
 
-    # fix others (d_mod already fixed for everyone; keep for clarity)
+    # fix others
     for rr in data.regions:
         if rr != region:
             q_man.fx[rr] = float(theta_fixed.q_man[rr])
+            d_mod.fx[rr] = float(theta_fixed.d_mod[rr])
             sigma.fx[rr] = float(theta_fixed.sigma[rr])
             beta.fx[rr] = float(theta_fixed.beta[rr])
 
@@ -89,13 +103,14 @@ def _best_response_mpec(
     x_mod = gp.Variable(m, name="x_mod", domain=[E, I], type=gp.VariableType.POSITIVE)
     x_man = gp.Variable(m, name="x_man", domain=R, type=gp.VariableType.POSITIVE)
     x_dem = gp.Variable(m, name="x_dem", domain=R, type=gp.VariableType.POSITIVE)
+    s_unmet = gp.Variable(m, name="s_unmet", domain=R, type=gp.VariableType.POSITIVE)
 
     # duals
     pi = gp.Variable(m, name="pi", domain=R, type=gp.VariableType.FREE)
     lam = gp.Variable(m, name="lam", type=gp.VariableType.FREE)
     mu = gp.Variable(m, name="mu", domain=R, type=gp.VariableType.POSITIVE)
     alpha = gp.Variable(m, name="alpha", domain=R, type=gp.VariableType.POSITIVE)
-    phi = gp.Variable(m, name="phi", domain=R, type=gp.VariableType.POSITIVE)
+    tau = gp.Variable(m, name="tau", domain=R, type=gp.VariableType.FREE)
     gamma = gp.Variable(m, name="gamma", domain=[E, I], type=gp.VariableType.POSITIVE)
 
     B = float(data.dual_bound)
@@ -103,6 +118,13 @@ def _best_response_mpec(
     pi.up[R] = B
     lam.lo = -B
     lam.up = B
+    tau.lo[R] = -B
+    tau.up[R] = B
+
+    # Dual normalization (same rationale as LLP MCP): anchor one pi to remove
+    # the constant-shift degree of freedom that otherwise makes `lam` exploitable.
+    ref_region = str(data.regions[0])
+    pi.fx[ref_region] = 0.0
 
     # -------------------------
     # Warm-start (critical for NLPEC local solves)
@@ -123,13 +145,14 @@ def _best_response_mpec(
         best_src[rr] = str(best)
 
     # initial demand guess from inverse demand: q ≈ max(0, (beta - price)/b)
-    # cap by exogenous Dcap (NOT theta_fixed.d_mod)
+    # cap by current offered demand cap (theta_fixed.d_mod) and physical Dcap
     xdem0: Dict[str, float] = {}
     xmod0: Dict[tuple[str, str], float] = {}
     for rr in data.regions:
         b = max(float(data.b_dem[rr]), 1e-9)
         q = (float(theta_fixed.beta[rr]) - delivered_cost[rr]) / b
-        q = max(0.0, min(float(data.Dcap[rr]), q))
+        qcap = min(float(theta_fixed.d_mod[rr]), float(data.Dcap[rr]))
+        q = max(0.0, min(qcap, q))
         xdem0[rr] = q
 
         ee = best_src[rr]
@@ -144,6 +167,7 @@ def _best_response_mpec(
     for rr in data.regions:
         x_dem.l[rr] = float(xdem0.get(rr, 0.0))
         x_man.l[rr] = float(xman0.get(rr, 0.0))
+        s_unmet.l[rr] = max(0.0, float(theta_fixed.d_mod[rr]) - float(xdem0.get(rr, 0.0)))
         for ee in data.regions:
             x_mod.l[ee, rr] = float(xmod0.get((ee, rr), 0.0))
 
@@ -155,36 +179,43 @@ def _best_response_mpec(
     global_balance = gp.Equation(m, name="global_balance")
     demand_slack = gp.Equation(m, name="demand_slack", domain=R)
     man_cap_slack = gp.Equation(m, name="man_cap_slack", domain=R)
-    dem_cap_slack = gp.Equation(m, name="dem_cap_slack", domain=R)
+    demand_target = gp.Equation(m, name="demand_target", domain=R)
     arc_cap_slack = gp.Equation(m, name="arc_cap_slack", domain=[E, I])
 
     man_split[R] = x_man[R] - gp.Sum(I, x_mod[R, I]) == Z
     global_balance[...] = gp.Sum(R, x_dem[R]) - gp.Sum(R, x_man[R]) == Z
     demand_slack[R] = gp.Sum(E, x_mod[E, R]) - x_dem[R] >= Z
     man_cap_slack[R] = q_man[R] - x_man[R] >= Z
-    dem_cap_slack[R] = d_mod[R] - x_dem[R] >= Z
+    demand_target[R] = x_dem[R] + s_unmet[R] - d_mod[R] == Z
     arc_cap_slack[E, I] = Xcap[E, I] - x_mod[E, I] >= Z
 
     grad_xman = gp.Equation(m, name="grad_xman", domain=R)
     grad_xdem = gp.Equation(m, name="grad_xdem", domain=R)
+    grad_sunm = gp.Equation(m, name="grad_sunm", domain=R)
     grad_xmod = gp.Equation(m, name="grad_xmod", domain=[E, I])
 
     grad_xman[R] = sigma[R] + pi[R] - lam + alpha[R] >= Z
 
-    # quadratic demand response in LLP KKT
-    grad_xdem[R] = (-beta[R] + b_dem[R] * x_dem[R]) + lam + mu[R] + phi[R] >= Z
+    # LLP KKT with unmet-demand slack
+    grad_xdem[R] = (-beta[R]) + lam + mu[R] + tau[R] >= Z
+
+    grad_sunm[R] = kappa_shortfall[R] * s_unmet[R] + tau[R] >= Z
 
     grad_xmod[E, I] = c_ship[E, I] - pi[E] - mu[I] + gamma[E, I] >= Z
 
+    # IMPORTANT: only put true complementarity pairs in `matches`.
+    #
+    # If you match an equality constraint with a (bounded) multiplier variable,
+    # the equality becomes an inequality-at-bounds in the resulting MCP/MPEC
+    # semantics, which breaks the KKT system and can yield "solutions" that
+    # violate primal feasibility (e.g., x_dem+s_unmet != d_mod).
     matches: Dict[Any, Any] = {
-        man_split: pi,
-        global_balance: lam,
         demand_slack: mu,
         man_cap_slack: alpha,
-        dem_cap_slack: phi,
         arc_cap_slack: gamma,
         grad_xman: x_man,
         grad_xdem: x_dem,
+        grad_sunm: s_unmet,
         grad_xmod: x_mod,
     }
 
@@ -193,6 +224,7 @@ def _best_response_mpec(
     br = gp.Model(
         m,
         name=f"br_{region}",
+        equations=[man_split, global_balance, demand_target] + list(matches.keys()),
         problem=gp.Problem.MPEC,
         sense=gp.Sense.MAX,
         objective=profit,
@@ -206,12 +238,12 @@ def _best_response_mpec(
     # updated theta (only this region changes)
     new_theta = theta_fixed.copy()
     q_dict = var_to_dict_1d(q_man)
-    d_dict = var_to_dict_1d(d_mod)     # fixed at Dcap
+    d_dict = var_to_dict_1d(d_mod)
     s_dict = var_to_dict_1d(sigma)
     b_dict = var_to_dict_1d(beta)
 
     new_theta.q_man[region] = float(q_dict.get(region, new_theta.q_man[region]))
-    new_theta.d_mod[region] = float(d_dict.get(region, data.Dcap[region]))  # keep consistent
+    new_theta.d_mod[region] = float(d_dict.get(region, new_theta.d_mod[region]))
     new_theta.sigma[region] = float(s_dict.get(region, new_theta.sigma[region]))
     new_theta.beta[region] = float(b_dict.get(region, new_theta.beta[region]))
 
@@ -219,12 +251,13 @@ def _best_response_mpec(
         x_mod=var_to_dict_2d(x_mod),
         x_man=var_to_dict_1d(x_man),
         x_dem=var_to_dict_1d(x_dem),
+        s_unmet=var_to_dict_1d(s_unmet),
         obj_value=None,
         lam=scalar_level(lam),
         pi=var_to_dict_1d(pi),
         mu=var_to_dict_1d(mu),
         alpha=var_to_dict_1d(alpha),
-        phi=var_to_dict_1d(phi),
+        tau=var_to_dict_1d(tau),
         gamma=var_to_dict_2d(gamma),
     )
 
@@ -247,6 +280,7 @@ def _best_response_grid(
     output: Optional[object],
     reason: str = "",
 ) -> Tuple[Theta, LLPResult, Dict[str, Any]]:
+    from ..llp.primal_lp import solve_llp_lp
     from ..llp.kkt_mcp import solve_llp_mcp
 
     cur = theta_fixed.copy()
@@ -256,18 +290,20 @@ def _best_response_grid(
     sigU = data.sigma_ub[region]
     betU = data.beta_ub[region]
 
-    # IMPORTANT FIX: d_mod is exogenous -> do not grid over it
     grids = {
         "q_man": [0.25 * Q, 0.5 * Q, 0.75 * Q, 0.9 * Q, Q],
+        "d_mod": [0.25 * D, 0.5 * D, 0.75 * D, 0.9 * D, D],
         "sigma": [0.1 * sigU, 0.25 * sigU, 0.5 * sigU, 0.75 * sigU],
         "beta": [0.1 * betU, 0.25 * betU, 0.5 * betU, 0.75 * betU],
     }
 
-    # enforce exogenous demand cap in the starting point
-    cur.d_mod[region] = float(D)
-
     best_theta = cur.copy()
-    best_llp, _ = solve_llp_mcp(data, best_theta, solver=solver_mcp, output=output)
+    try:
+        # Prefer primal QP (gives feasible primals + usable `lam` via marginals).
+        best_llp, _ = solve_llp_lp(data, best_theta, solver=None, output=output)
+    except Exception:
+        # Fallback: KKT-MCP via PATH if no QP solver is available.
+        best_llp, _ = solve_llp_mcp(data, best_theta, solver=solver_mcp, output=output)
     best_profit = profit_value(region, data, best_theta, best_llp)
 
     for _sweep in range(2):
@@ -275,8 +311,10 @@ def _best_response_grid(
             for v in cand:
                 trial = best_theta.copy()
                 getattr(trial, key)[region] = float(v)
-                trial.d_mod[region] = float(D)  # keep exogenous
-                llp, _ = solve_llp_mcp(data, trial, solver=solver_mcp, output=output)
+                try:
+                    llp, _ = solve_llp_lp(data, trial, solver=None, output=output)
+                except Exception:
+                    llp, _ = solve_llp_mcp(data, trial, solver=solver_mcp, output=output)
                 p = profit_value(region, data, trial, llp)
                 if p > best_profit:
                     best_profit = p
@@ -290,4 +328,3 @@ def _best_response_grid(
         "best_profit": best_profit,
     }
     return best_theta, best_llp, info
-

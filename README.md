@@ -50,3 +50,16 @@ Stationarity (gradient >= 0 ⟂ primal var >= 0):
 
 ## Repo layout
 
+## Setup (GAMSPy + solvers)
+
+This project uses **GAMSPy**, which ships a local GAMS runtime via `gamspy_base`. Add-on solvers (like **KNITRO**) are installed via the GAMSPy CLI.
+
+PowerShell (Windows):
+- Create/activate venv: `.\workflow\activate_gamspy_epec.ps1`
+- Install Python deps: `python -m pip install -r requirements.txt`
+- List installable solvers: `$env:PYTHONUTF8=1; python -m gamspy list solvers --installables`
+- Install KNITRO: `$env:PYTHONUTF8=1; python -m gamspy install solver KNITRO`
+- Install your GAMS license (if needed): `$env:PYTHONUTF8=1; python -m gamspy install license <access_code_or_path>`
+
+Then run with Knitro for the MPEC best-response, e.g. `python gamspy/executables/run_gs.py --method mpec --solver-mpec KNITRO --solver-mcp path ...`.
+

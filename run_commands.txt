@@ -6,6 +6,10 @@
 # ---------------------------------------------------------------------------
 python gamspy/executables/run_gs.py --method mpec --solver-mpec nlpec --solver-mcp path --max-iter 25 --tol 1e-6 --damping 1.0
 
+# If you want KNITRO for the MPEC best-response:
+#   $env:PYTHONUTF8=1; python -m gamspy install solver KNITRO
+#   python gamspy/executables/run_gs.py --method mpec --solver-mpec KNITRO --solver-mcp path --max-iter 25 --tol 1e-6 --damping 1.0
+
 # ---------------------------------------------------------------------------
 # ALL FLAGS (current runner)
 # ---------------------------------------------------------------------------

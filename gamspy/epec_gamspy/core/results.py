@@ -56,6 +56,9 @@ class LLPResult:
     x_man: Dict[str, float]
     x_dem: Dict[str, float]
 
+    # unmet demand (shortfall) in LLP: x_dem[r] + s_unmet[r] = d_mod[r]
+    s_unmet: Optional[Dict[str, float]] = None
+
     # objective + key duals
     obj_value: Optional[float] = None
     lam: Optional[float] = None
@@ -64,6 +67,9 @@ class LLPResult:
     alpha: Optional[Dict[str, float]] = None
     phi: Optional[Dict[str, float]] = None
     gamma: Optional[Dict[Tuple[str, str], float]] = None
+
+    # NEW: dual for demand-target equality (free): x_dem[r] + s_unmet[r] - d_mod[r] = 0
+    tau: Optional[Dict[str, float]] = None
 
 
 @dataclass
@@ -89,11 +95,14 @@ def max_abs_diff_2d(a: Dict[Tuple[str, str], float], b: Dict[Tuple[str, str], fl
 
 
 def max_abs_diff_llp(lp: LLPResult, mcp: LLPResult) -> float:
-    return max(
+    diffs = [
         max_abs_diff_1d(lp.x_man, mcp.x_man),
         max_abs_diff_1d(lp.x_dem, mcp.x_dem),
         max_abs_diff_2d(lp.x_mod, mcp.x_mod),
-    )
+    ]
+    if lp.s_unmet is not None or mcp.s_unmet is not None:
+        diffs.append(max_abs_diff_1d(lp.s_unmet or {}, mcp.s_unmet or {}))
+    return max(diffs)
 
 
 def clamp(x: float, lo: float, up: float) -> float:
